@@ -176,6 +176,31 @@ def find_gowin(explicit: str | None) -> str:
         )
     return found
 
+def load_linux_dependencies(gowin: str):
+    lib_path = Path(f"{gowin}/IDE/lib")
+    if not lib_path.exists():
+        raise RuntimeError(f"{str(lib_path)} doesn't exist - check GoWIN IDE install")
+
+    libfreetype_path = Path(f"/lib/x86_64-linux-gnu/libfreetype.so")
+    if not libfreetype_path.exists():
+        raise RuntimeError(f"Unable to find '{str(libfreetype_path)}' - is 'libfreetype6-dev' installed?")
+
+    libz_path = Path(f"/lib/x86_64-linux-gnu/libz.so.1")
+    if not libz_path.exists():
+        raise RuntimeError(f"Unable to find '{str(libz_path)}' - is 'zlib1g' / 'zlib1g-dev' installed?")
+
+    env = os.environ.copy()
+    env["LD_LIBRARY_PATH"] = lib_path
+    env["LD_PRELOAD"] = f"{str(libfreetype_path)}:{str(libz_path)}"
+
+    return env
+
+def load_windows_dependencies(gowin: str):
+    env = os.environ.copy()
+
+    # TODO: anything to do here ?
+
+    return env
 
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -227,12 +252,16 @@ def main() -> int:
         print(f"error: tcl script not found: {BUILD_SCRIPT}", file=sys.stderr)
         return 2
 
-    cmd = [ f"{gowin}/IDE/bin/{GW_SH_PROC}", str(BUILD_SCRIPT), str(ROOT) ]
+    if sys.platform == "linux":
+        env = load_linux_dependencies(gowin)
+    elif sys.platform == "win32":
+        env = load_windows_dependencies(gowin)
 
+    cmd = [ f"{gowin}/IDE/bin/{GW_SH_PROC}", str(BUILD_SCRIPT), str(ROOT) ]
     try:
-        result = subprocess.run(cmd, check=False)
+        result = subprocess.run(cmd, env=env, check=False)
     except FileNotFoundError as exc:
-        print(f"error: failed to launch vivado: {exc}", file=sys.stderr)
+        print(f"error: failed to launch gw_sh: {exc}", file=sys.stderr)
         return 3
 
     if result.returncode != 0:
