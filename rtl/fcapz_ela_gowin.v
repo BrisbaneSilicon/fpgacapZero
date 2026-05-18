@@ -109,7 +109,7 @@ module fcapz_ela_gowin #(
     );
 
     // ---- Register interface ----
-    jtag_reg_iface u_reg (
+    jtag_reg_iface_gowin u_reg (
         .arst           (jtag_rst_ctrl),
 
         .tck            (sysclk),
