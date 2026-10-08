@@ -3192,5 +3192,93 @@ class FindInCaptureTests(unittest.TestCase):
             self._session().capture_samples(start=1, around_trigger=2)
 
 
+
+class AxiWriteRangeTests(unittest.TestCase):
+    """--axi-write-range confines writes to the addresses the operator named."""
+
+    RANGES = ((0x40000000, 0x4000FFFF), (0x40010000, 0x4001000F))
+
+    def _session(self):
+        return FcapzMcpSession(
+            rpc=FakeRpc(),
+            capabilities=McpCapabilities(
+                allow_axi_write=True, axi_write_ranges=self.RANGES
+            ),
+        )
+
+    def test_writes_inside_a_range_go_through(self):
+        session = self._session()
+        session.axi_write(0x40000000, 1)
+        session.axi_write(0x4000FFFC, 1)
+        # Adjacent ranges admit a block that straddles them.
+        session.axi_write_block(0x4000FFF8, [1, 2, 3, 4])
+        self.assertEqual(
+            [req["cmd"] for req in session.rpc.requests],
+            ["axi_write", "axi_write", "axi_write_block"],
+        )
+
+    def test_any_byte_outside_refuses_the_whole_call(self):
+        session = self._session()
+        cases = [
+            lambda: session.axi_write(0x3FFFFFFC, 1),
+            # The last word's bytes run past the end of the second range.
+            lambda: session.axi_write_block(0x40010008, [1, 2, 3]),
+            # Unaligned: the word's top byte is past the end.
+            lambda: session.axi_write(0x4001000E, 1),
+            lambda: session.axi_write_words("0x50000000", [1]),
+        ]
+        for call in cases:
+            with self.assertRaisesRegex(PermissionError, "0x40000000-0x4000FFFF"):
+                call()
+        self.assertEqual(session.rpc.requests, [])
+
+    def test_no_ranges_means_the_whole_bus(self):
+        session = FcapzMcpSession(
+            rpc=FakeRpc(), capabilities=McpCapabilities(allow_axi_write=True)
+        )
+        session.axi_write(0, 1)
+        self.assertIsNone(session.status()["capabilities"]["axi_write_ranges"])
+
+    def test_status_reports_the_ranges(self):
+        self.assertEqual(
+            self._session().status()["capabilities"]["axi_write_ranges"],
+            ["0x40000000-0x4000FFFF", "0x40010000-0x4001000F"],
+        )
+
+    def test_the_flag_parses_and_implies_axi_write(self):
+        args = mcp_server.build_parser().parse_args(
+            ["--axi-write-range", "0x40000000:0x4000FFFF", "--axi-write-range", "16:31"]
+        )
+        self.assertEqual(args.axi_write_range, [(0x40000000, 0x4000FFFF), (16, 31)])
+
+        seen = {}
+
+        class DoneServer:
+            def run(self, **kwargs):
+                return None
+
+        def capture(session):
+            seen["caps"] = session.capabilities
+            return DoneServer()
+
+        with patch.object(mcp_server, "build_mcp_server", side_effect=capture):
+            self.assertEqual(main(["--axi-write-range", "0x10:0x1F"]), 0)
+        self.assertTrue(seen["caps"].allow_axi_write)
+        self.assertEqual(seen["caps"].axi_write_ranges, ((0x10, 0x1F),))
+
+    def test_the_flag_rejects_bad_ranges_and_read_only(self):
+        for argv in (
+            ["--axi-write-range", "0x20:0x10"],
+            ["--axi-write-range", "0x10"],
+            ["--axi-write-range", "0x0:0x100000000"],
+            ["--axi-write-range", "lo:hi"],
+            ["--read-only", "--axi-write-range", "0:3"],
+        ):
+            with self.subTest(argv=argv):
+                with redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        main(argv)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -96,12 +96,30 @@ also disables capture-side actions that change ELA state.
 | `--read-only` | Disables `fcapz_configure`, `fcapz_arm`, `fcapz_capture`, `fcapz_disarm`, the readout mode of `fcapz_capture_wait` (its `status_only` poll stays), and all write/send/program enable flags. |
 | `--allow-eio-write` | `fcapz_eio_write` |
 | `--allow-axi-write` | `fcapz_axi_write`, anywhere on the bus |
+| `--axi-write-range LO:HI` | `fcapz_axi_write`, but only inside this inclusive byte-address range (repeatable; implies `--allow-axi-write`) |
 | `--allow-uart-send` | `fcapz_uart_send` |
 | `--allow-program --bitfile-root DIR` | `fcapz_connect(program=...)` for `.bit` files under `DIR` |
 | `--probe-root DIR` | Capture config `probe_file` may read a probe map sitting directly in `DIR` |
 | `--allow-host HOST` | A backend may connect to `HOST` as well as loopback (repeatable) |
 
 `--read-only` cannot be combined with any write/program enable flag.
+
+`--axi-write-range` is the safer way to enable AXI writes on a live system:
+name the peripheral's register window rather than handing the agent the whole
+bus, which on a SoC includes DDR, interconnect configuration and the bridge's
+own neighbours. Addresses are hex or decimal, `LO <= HI`, both within 32
+bits:
+
+```bash
+fcapz-mcp --axi-write-range 0x40000000:0x4000FFFF --axi-write-range 0x43C00000:0x43C0001F
+```
+
+Every byte of every word a call writes must fall inside some range, so two
+adjacent ranges admit a block that straddles them, and a call with any word
+outside is refused whole (`not_permitted`, naming the word and the ranges)
+rather than written part way. Reads are not confined. `fcapz_status` reports
+the ranges under `capabilities.axi_write_ranges` (`null` when writes, if
+enabled, may go anywhere).
 
 Two fields reach past the JTAG cable and are therefore confined by default:
 

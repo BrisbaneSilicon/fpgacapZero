@@ -287,6 +287,9 @@ class McpCapabilities:
     allow_capture: bool = True
     allow_eio_write: bool = False
     allow_axi_write: bool = False
+    # Inclusive byte-address ranges AXI writes are confined to. Empty means
+    # the whole bus once allow_axi_write is on; --axi-write-range sets both.
+    axi_write_ranges: tuple[tuple[int, int], ...] = ()
     allow_uart_send: bool = False
     allow_program: bool = False
     bitfile_root: Path | None = None
@@ -296,6 +299,28 @@ class McpCapabilities:
     allowed_hosts: tuple[str, ...] = ()
     rpc_timeout_sec: float = 30.0
     rpc_cancel_grace_sec: float = _RPC_CANCEL_GRACE_SEC
+
+
+def _format_ranges(ranges: tuple[tuple[int, int], ...]) -> list[str]:
+    return [f"0x{lo:08X}-0x{hi:08X}" for lo, hi in ranges]
+
+
+def _axi_write_range(text: str) -> tuple[int, int]:
+    """argparse type for --axi-write-range LO:HI (inclusive byte addresses)."""
+    lo_text, sep, hi_text = text.partition(":")
+    try:
+        if not sep:
+            raise ValueError
+        lo, hi = int(lo_text, 0), int(hi_text, 0)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected LO:HI byte addresses such as 0x40000000:0x4000FFFF, got {text!r}"
+        ) from None
+    if not 0 <= lo <= hi <= 0xFFFFFFFF:
+        raise argparse.ArgumentTypeError(
+            f"range {text!r} must satisfy 0 <= LO <= HI <= 0xFFFFFFFF"
+        )
+    return lo, hi
 
 
 class FcapzMcpError(RuntimeError):
@@ -2513,6 +2538,7 @@ class FcapzMcpSession:
             raise PermissionError(
                 "AXI writes are disabled; restart with --allow-axi-write to enable them"
             )
+        self._check_axi_write_span(int(addr), 1)
         return self._rpc_call(
             {"cmd": "axi_write", "addr": int(addr), "data": int(data), "wstrb": int(wstrb)}
         )
@@ -2534,6 +2560,7 @@ class FcapzMcpSession:
                 f"data has {len(words)} words; the per-call limit is "
                 f"{_MAX_AXI_WORDS} — split the write into smaller blocks"
             )
+        self._check_axi_write_span(int(addr), len(words))
         return self._rpc_call(
             {
                 "cmd": "axi_write_block",
@@ -2542,6 +2569,26 @@ class FcapzMcpSession:
                 "burst": bool(burst),
             }
         )
+
+    def _check_axi_write_span(self, addr: int, words: int) -> None:
+        """Refuse a write any of whose bytes fall outside the allowed ranges.
+
+        Checked word by word, so two adjacent ranges admit a block that
+        straddles them, and the whole call is refused rather than clipped: a
+        block half written is worse than one not written at all.
+        """
+        ranges = self.capabilities.axi_write_ranges
+        if not ranges:
+            return
+        for word in range(words):
+            lo = addr + 4 * word
+            hi = lo + 3
+            if not any(r_lo <= lo and hi <= r_hi for r_lo, r_hi in ranges):
+                raise PermissionError(
+                    f"AXI write to 0x{lo:08X}..0x{hi:08X} is outside the "
+                    f"allowed range(s) {', '.join(_format_ranges(ranges))}; "
+                    "the operator sets them with --axi-write-range"
+                )
 
     def axi_dump(self, addr: int, count: int, *, burst: bool = False) -> JsonDict:
         count_i = int(count)
@@ -2790,6 +2837,12 @@ class FcapzMcpSession:
                 "allow_capture": self.capabilities.allow_capture,
                 "allow_eio_write": self.capabilities.allow_eio_write,
                 "allow_axi_write": self.capabilities.allow_axi_write,
+                # null when writes, if enabled, may go anywhere on the bus.
+                "axi_write_ranges": (
+                    _format_ranges(self.capabilities.axi_write_ranges)
+                    if self.capabilities.axi_write_ranges
+                    else None
+                ),
                 "allow_uart_send": self.capabilities.allow_uart_send,
                 "allow_program": self.capabilities.allow_program,
                 "rpc_timeout_sec": self.capabilities.rpc_timeout_sec,
@@ -3593,7 +3646,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--allow-axi-write",
         action="store_true",
-        help="Allow fcapz_axi_write to modify AXI memory/registers anywhere on the bus",
+        help=(
+            "Allow fcapz_axi_write to modify AXI memory/registers anywhere on "
+            "the bus (use --axi-write-range to confine it)"
+        ),
+    )
+    parser.add_argument(
+        "--axi-write-range",
+        action="append",
+        default=[],
+        type=_axi_write_range,
+        metavar="LO:HI",
+        dest="axi_write_range",
+        help=(
+            "Allow fcapz_axi_write only inside this inclusive byte-address "
+            "range, e.g. 0x40000000:0x4000FFFF. Repeatable; implies "
+            "--allow-axi-write"
+        ),
     )
     parser.add_argument(
         "--allow-uart-send",
@@ -3666,6 +3735,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.read_only and (
         args.allow_eio_write
         or args.allow_axi_write
+        or args.axi_write_range
         or args.allow_uart_send
         or args.allow_program
     ):
@@ -3685,7 +3755,10 @@ def main(argv: list[str] | None = None) -> int:
         probe_root=args.probe_root,
         allowed_hosts=tuple(args.allow_host),
         allow_eio_write=bool(args.allow_eio_write),
-        allow_axi_write=bool(args.allow_axi_write),
+        # A range is an enable: naming where writes may go and then having
+        # them refused everywhere would be a trap, not a safety.
+        allow_axi_write=bool(args.allow_axi_write or args.axi_write_range),
+        axi_write_ranges=tuple(args.axi_write_range),
         allow_uart_send=bool(args.allow_uart_send),
         allow_program=bool(args.allow_program),
         bitfile_root=args.bitfile_root,

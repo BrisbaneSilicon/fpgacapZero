@@ -9,6 +9,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **MCP — `--axi-write-range LO:HI` confines AXI writes.** Repeatable; it
+  implies `--allow-axi-write` but only for the named inclusive byte ranges,
+  so an agent can be given a peripheral's register window rather than the
+  whole bus. A write with any byte outside is refused whole with
+  `not_permitted`, naming the word and the allowed ranges; `fcapz_status`
+  reports them as `capabilities.axi_write_ranges`. Reads are unaffected.
+
 - **MCP — search a capture instead of paging it.** `fcapz_find_in_capture`
   finds the edges of a named field, rising/falling edges of a bit, every
   sample matching a value under a mask, or runs of one value (optionally at
