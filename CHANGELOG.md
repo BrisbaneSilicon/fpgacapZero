@@ -171,7 +171,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
-- **MCP — fewer, broader tools.** The surface shrinks from 31 tools to 22,
+- **MCP — fewer, broader tools.** The surface shrinks from 31 tools to 22
+  (23 with `fcapz_find_in_capture`),
   cutting the schema every request carries. The read/write split stays, so
   annotations and capability gating are unchanged:
 

@@ -408,7 +408,8 @@ around the hits:
    `fields` narrows the signals returned; `fields=[]` gives the packed value
    instead. `radix` is `"hex"` (default) or `"int"`, and values too wide for
    an exact JSON number stay hex either way. `around_trigger=N` returns
-   the `N` samples either side of the trigger instead of `start`/`count`; when
+   the `N` samples either side of the trigger instead of `start`/`count`
+   (`N` up to 255, so the window fits one page — rejected above that); when
    the trigger cannot be located (a segmented capture, or one shorter than
    `pretrigger + posttrigger + 1`) the page comes back empty with a `reason`
    rather than a guess.
@@ -682,7 +683,7 @@ as a failure rather than as another poll.
 | `eio_connected` | Whether an EIO connection is active. |
 | `axi_connected` | Whether an AXI bridge connection is active. |
 | `uart_connected` | Whether a UART bridge connection is active. |
-| `capabilities` | Server safety and timeout settings, including write/program enables, `bitfile_root`, `rpc_timeout_sec`, and `rpc_cancel_grace_sec`. |
+| `capabilities` | Server safety and timeout settings, including write/program enables, `axi_write_ranges`, `probe_root`, `allowed_hosts`, `bitfile_root`, `rpc_timeout_sec`, and `rpc_cancel_grace_sec`. |
 | `last_probe` | Last probe result, or `null` before probing or after close/drop-reset paths. |
 | `last_capture_summary` | Compact summary of the last capture, or `null` when no capture is cached. |
 | `last_capture_size_bytes` | Compact JSON byte size of the cached full capture, or `null` when no capture is cached. |

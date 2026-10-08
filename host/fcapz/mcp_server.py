@@ -1702,6 +1702,15 @@ class FcapzMcpSession:
             span = int(around_trigger)
             if span < 0:
                 raise ValueError("around_trigger must be >= 0")
+            # Rejected, not clamped: a clamped window drops samples after the
+            # trigger first, and past the page size the trigger itself.
+            max_span = (self._SAMPLES_MAX_PAGE - 1) // 2
+            if span > max_span:
+                raise ValueError(
+                    f"around_trigger must be <= {max_span} (a page holds "
+                    f"{self._SAMPLES_MAX_PAGE} samples); page with start/count "
+                    "for a wider window"
+                )
             if start_i != 0:
                 raise ValueError("pass either start or around_trigger, not both")
             trigger = None if multi else self._trigger_index(
@@ -3292,9 +3301,9 @@ def build_mcp_server(session: FcapzMcpSession):
         get the packed `value` instead. `radix` is "hex" (default) or "int" —
         values too wide for an exact JSON number are always hex regardless.
         Page with the returned `next_start` until it is null; `count` is
-        capped at 512. `around_trigger=N` returns the N samples either side
-        of the trigger instead of start/count (an empty page with a `reason`
-        when the trigger cannot be located). To find something rather than
+        capped at 512. `around_trigger=N` (N <= 255) returns the N samples
+        either side of the trigger instead of start/count (an empty page with
+        a `reason` when the trigger cannot be located). To find something rather than
         read everything, use fcapz_find_in_capture. For an AXI monitor
         capture, prefer fcapz_axi_transactions — transactions beat cycles for
         bus debugging.

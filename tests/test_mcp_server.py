@@ -3191,6 +3191,11 @@ class FindInCaptureTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not both"):
             self._session().capture_samples(start=1, around_trigger=2)
 
+    def test_around_the_trigger_is_never_silently_clipped(self):
+        # A window wider than a page would lose the trigger from the page.
+        with self.assertRaisesRegex(ValueError, "<= 255"):
+            self._session().capture_samples(around_trigger=256)
+
 
 
 class AxiWriteRangeTests(unittest.TestCase):
