@@ -812,6 +812,9 @@ fcapz_close(core="uart")
 | A new tool call says a previous RPC is still running | A timed-out hardware call is still executing in the background. | The MCP client or host wrapper needs to restart `fcapz-mcp` before issuing more hardware commands. |
 | `fcapz://last-capture` is unavailable | No capture has completed, or the payload was dropped/closed. | Run `fcapz_capture` again. |
 | USB-Blaster rejects `host` | That backend does not use host/port sockets. | Omit `host`, `port`, and `tap` entirely for `usb_blaster`. |
+| The next session cannot open the cable after an HTTP server went away | The server was killed rather than stopped, so its shutdown never closed the board session and a backend process (for example `quartus_stp`) may still hold the JTAG cable. | Stop an HTTP server with Ctrl-C, which closes every hardware connection. After a hard kill, end the leftover backend process before reconnecting. |
+| HTTP client gets `401` | Missing, misspelled or wrong `Authorization: Bearer` header. | Send the exact token the server was started with (`FCAPZ_MCP_TOKEN` or `--http-token-file`). |
+| HTTP client gets `421 Invalid Host header` | A loopback-bound server only accepts `127.0.0.1`, `localhost` or `[::1]` as the `Host`. | Connect by one of those names, or bind a network address with `--http-host` (plus TLS). |
 
 ## Related Chapters
 

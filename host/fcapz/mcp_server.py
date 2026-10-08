@@ -3455,6 +3455,9 @@ def build_mcp_server(
         """Arm the connected ELA using the current hardware configuration.
 
         Pairs with fcapz_configure; read the result out with fcapz_capture_wait.
+        It arms whatever configuration the core holds, so a fcapz_configure
+        that was rejected leaves the previous one in force — check that the
+        configure succeeded first.
         """
 
         return session.arm()
