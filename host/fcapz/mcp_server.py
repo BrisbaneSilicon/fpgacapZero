@@ -560,6 +560,10 @@ def _error_code(exc: BaseException) -> str:
         # The board or the backend refused, or the link failed. Not a bug in
         # this server, and retrying after a reconnect can work.
         return "hardware_error"
+    if isinstance(exc, RuntimeError) and getattr(exc, "_fcapz_from_backend", False):
+        # A transport's own failure report. A TypeError or KeyError from the
+        # same call is still a bug, and still says so.
+        return "hardware_error"
     if _reads_as_not_connected(exc):
         return "not_connected"
     return "internal"
@@ -814,6 +818,14 @@ class FcapzMcpSession:
             failure: BaseException | None = None
         except BaseException as exc:  # noqa: BLE001 - relayed to the caller
             raw, failure = None, exc
+            # Transports report a board that answered wrongly -- no cores in
+            # the bitstream, a quartus_stp error line -- as a bare
+            # RuntimeError. Mark where it came from so it is classified as
+            # the hardware condition it is, not as a bug in this server.
+            try:
+                exc._fcapz_from_backend = True  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001 - a slotted exception; leave it
+                pass
 
         # Response checking and any heavy derivation happen off the lock: they
         # read only this response, and holding the hardware lock through a

@@ -3415,5 +3415,35 @@ class HttpTransportTests(unittest.TestCase):
         self.assertTrue(response.headers.get("mcp-session-id"))
 
 
+
+class BackendFailureCodeTests(unittest.TestCase):
+    """A transport's bare RuntimeError is the board talking, not a bug."""
+
+    class _RaisingRpc:
+        def __init__(self, exc):
+            self.exc = exc
+
+        def handle(self, req):
+            raise self.exc
+
+    def _code(self, exc):
+        from fcapz.mcp_server import _error_code
+
+        session = FcapzMcpSession(rpc=self._RaisingRpc(exc))
+        with self.assertRaises(type(exc)) as caught:
+            session.probe()
+        return _error_code(caught.exception)
+
+    def test_a_backend_runtime_error_is_a_hardware_error(self):
+        # Seen on a real board carrying a design with no fpgacapZero cores.
+        self.assertEqual(
+            self._code(RuntimeError("No fpgacapZero-compatible cores found")),
+            "hardware_error",
+        )
+
+    def test_a_programming_error_in_the_same_path_stays_internal(self):
+        self.assertEqual(self._code(TypeError("bad operand")), "internal")
+
+
 if __name__ == "__main__":
     unittest.main()

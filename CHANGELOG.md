@@ -288,6 +288,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **MCP — a board with no fpgacapZero cores was reported as a server bug.**
+  Transports report a board that answered wrongly as a bare `RuntimeError`,
+  which the error classifier filed under `internal` ("report this; it is a
+  bug in fcapz-mcp"). A `RuntimeError` raised from inside the hardware call
+  is now `hardware_error`; a `TypeError` or similar from the same path still
+  reads as `internal`.
+
 - **A full-capture tool result can no longer stall the server for an
   unbounded time.** FastMCP turns a tool result back into JSON on the event
   loop *after* the offloaded call returns, so the payload
