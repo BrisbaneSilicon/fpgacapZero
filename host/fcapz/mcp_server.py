@@ -75,6 +75,10 @@ JsonDict = dict[str, Any]
 # session still validates: a schema is the client's contract, not the
 # server's guarantee.
 Backend = Literal["hw_server", "openocd", "usb_blaster"]
+# The debug cores one fcapz_connect can open. RPC `close` tears the whole
+# board session down, so the ELA has no close of its own: "all" is it.
+Core = Literal["ela", "eio", "axi", "uart"]
+CloseTarget = Literal["all", "eio", "axi", "uart"]
 CaptureFormat = Literal["json", "csv", "vcd"]
 SampleRadix = Literal["hex", "int"]
 TransactionKind = Literal["read", "write"]
@@ -317,7 +321,10 @@ _ERROR_ACTIONS: dict[str, tuple[bool, str]] = {
         "the wait expired without the hardware finishing; retry with a larger "
         "timeout, or check that the trigger can fire",
     ),
-    "not_connected": (True, "call the matching connect tool first"),
+    "not_connected": (
+        True,
+        "call fcapz_connect with the matching `core` first",
+    ),
     "not_permitted": (
         False,
         "the operator must restart fcapz-mcp with the capability flag named "
@@ -2359,6 +2366,137 @@ class FcapzMcpSession:
     def uart_status(self) -> JsonDict:
         return self._rpc_call({"cmd": "uart_status"})
 
+    def connect_core(
+        self,
+        core: Core = "ela",
+        *,
+        backend: Backend = "hw_server",
+        host: str | None = None,
+        port: int | None = None,
+        tap: str | None = None,
+        chain: int | None = None,
+        program: str | None = None,
+        single_chain_burst: bool = True,
+        hardware: str | None = None,
+        quartus_stp: str | None = None,
+    ) -> JsonDict:
+        """Open one debug core; the MCP surface has a single connect tool."""
+        fields: JsonDict = {
+            "backend": backend,
+            "host": host,
+            "port": port,
+            "tap": tap,
+            "chain": chain,
+            "hardware": hardware,
+            "quartus_stp": quartus_stp,
+        }
+        if core == "ela":
+            return self.connect(
+                program=program, single_chain_burst=single_chain_burst, **fields
+            )
+        if core not in ("eio", "axi", "uart"):
+            raise ValueError(
+                f"core must be one of ela, eio, axi, uart; got {core!r}"
+            )
+        # Silently ignoring these would program nothing, or burst nothing,
+        # and report success.
+        if program:
+            raise ValueError("program= applies to core='ela' only")
+        if single_chain_burst is not True:
+            raise ValueError("single_chain_burst applies to core='ela' only")
+        opener = {
+            "eio": self.eio_connect,
+            "axi": self.axi_connect,
+            "uart": self.uart_connect,
+        }[core]
+        return opener(**fields)
+
+    def close_core(self, core: CloseTarget = "all") -> JsonDict:
+        if core == "all":
+            return self.close()
+        if core == "ela":
+            raise ValueError(
+                "the ELA cannot be closed on its own: RPC close tears down the "
+                "whole board session; use core='all'"
+            )
+        closer = {
+            "eio": self.eio_close,
+            "axi": self.axi_close,
+            "uart": self.uart_close,
+        }.get(core)
+        if closer is None:
+            raise ValueError(
+                f"core must be one of all, eio, axi, uart; got {core!r}"
+            )
+        return closer()
+
+    def axi_read_words(
+        self, addr: int | str, count: int = 1, *, burst: bool = False
+    ) -> JsonDict:
+        """One read tool for a word or a block, always shaped the same."""
+        addr_i = self._word_arg(addr, "addr")
+        count_i = int(count)
+        if count_i < 1:
+            raise ValueError(f"count must be >= 1, got {count_i}")
+        if count_i == 1 and not burst:
+            value = self.axi_read(addr_i).get("value")
+            return {"ok": True, "addr": f"0x{addr_i:08X}", "count": 1,
+                    "value": value, "words": [value]}
+        response = self.axi_dump(addr_i, count_i, burst=burst)
+        words = list(response.get("words") or [])
+        out: JsonDict = {"ok": True, "addr": f"0x{addr_i:08X}",
+                         "count": len(words), "words": words}
+        if len(words) == 1:
+            out["value"] = words[0]
+        return out
+
+    def axi_write_words(
+        self,
+        addr: int | str,
+        data: int | str | list[int | str],
+        *,
+        wstrb: int = 0xF,
+        burst: bool = False,
+    ) -> JsonDict:
+        """One write tool: a single word (with byte strobes) or a block."""
+        addr_i = self._word_arg(addr, "addr")
+        if isinstance(data, list):
+            if int(wstrb) != 0xF:
+                raise ValueError(
+                    "wstrb applies to a single-word write only; a block "
+                    "writes whole words"
+                )
+            words = [self._word_arg(word, "data") for word in data]
+            if not words:
+                raise ValueError("data is an empty list; nothing to write")
+            return self.axi_write_block(addr_i, words, burst=burst)
+        if burst:
+            raise ValueError("burst applies to a block write (data as a list)")
+        return self.axi_write(addr_i, self._word_arg(data, "data"), wstrb)
+
+    @staticmethod
+    def _word_arg(value: int | str, name: str) -> int:
+        """An address or data word, as an int or a base-prefixed string.
+
+        Agents read register maps in hex; making them convert to decimal
+        first is where a digit gets lost.
+        """
+        if isinstance(value, bool):
+            raise ValueError(f"{name} must be an integer, got {value!r}")
+        if isinstance(value, str):
+            try:
+                out = int(value, 0)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{name} must be an integer or a base-prefixed string "
+                    f"(e.g. \"0x40000000\"), got {value!r}"
+                ) from exc
+        else:
+            out = int(value)
+        if not 0 <= out <= 0xFFFFFFFF:
+            raise ValueError(f"{name} must fit in 32 bits, got {value!r}")
+        return out
+
     def status(self) -> SessionStatus:
         # Everything is read under one hold of the lock. Commits run under it
         # too, so this cannot straddle one and report a busy slot alongside
@@ -2685,6 +2823,7 @@ def build_mcp_server(session: FcapzMcpSession):
         readOnlyHint=False,
     )
     def fcapz_connect(
+        core: Core = "ela",
         backend: Backend = "hw_server",
         host: str | None = None,
         port: int | None = None,
@@ -2695,22 +2834,27 @@ def build_mcp_server(session: FcapzMcpSession):
         hardware: str | None = None,
         quartus_stp: str | None = None,
     ) -> JsonDict:
-        """Connect to an ELA core.
+        """Connect to a debug core: the ELA (default), EIO, AXI or UART bridge.
+
+        Each core is a separate session on the same cable; open the ones you
+        need, one call each. `chain` is the JTAG USER chain the core sits on:
+        omit it for the ELA to probe the default and autodetect; it defaults
+        to 3 (0 on usb_blaster) for "eio" and to 4 for "axi"/"uart".
 
         Backends: "hw_server" (AMD/Xilinx hw_server, the default), "openocd"
         (any OpenOCD-supported adapter), and "usb_blaster" (Intel/Altera via
         Quartus). For usb_blaster, `hardware` selects the Quartus cable and
-        `quartus_stp` names the quartus_stp executable — the latter spawns a
+        `quartus_stp` names the quartus_stp executable â€” the latter spawns a
         host process, so it is rejected unless fcapz-mcp was started with
         --allow-program (omit it to use the server's configured toolchain).
         `hardware`/`quartus_stp` are rejected for the other backends, and
-        host/port/tap are rejected for usb_blaster. `chain` selects the JTAG
-        USER chain the ELA sits on; omit it to probe the default and autodetect.
-        All timeout values are in seconds. `program` is hw_server-only, disabled
-        unless started with --allow-program, and must be an existing .bit file.
+        host/port/tap are rejected for usb_blaster. `program` (ELA only,
+        hw_server only) is disabled unless started with --allow-program and
+        must be an existing .bit file; `single_chain_burst` is ELA only.
         """
 
-        return session.connect(
+        return session.connect_core(
+            core,
             backend=backend,
             host=host,
             port=port,
@@ -2723,10 +2867,15 @@ def build_mcp_server(session: FcapzMcpSession):
         )
 
     @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=False)
-    def fcapz_close() -> JsonDict:
-        """Close the active ELA connection."""
+    def fcapz_close(core: CloseTarget = "all") -> JsonDict:
+        """Close a debug-core session.
 
-        return session.close()
+        "all" (the default) ends the whole board session: the ELA plus any
+        open EIO/AXI/UART core. "eio", "axi" or "uart" closes that one core
+        and leaves the rest open. The ELA has no close of its own.
+        """
+
+        return session.close_core(core)
 
     @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=True)
     def fcapz_probe() -> JsonDict:
@@ -2769,8 +2918,9 @@ def build_mcp_server(session: FcapzMcpSession):
         add decoded event metadata to the capture result.
         segments=true reads back every segment of a segmented core instead of
         segment 0 alone (fcapz_probe reports num_segments).
-        The tool returns summary metadata only; use fcapz_get_last_capture or
-        fcapz://last-capture for full payloads.
+        The tool returns summary metadata only; page the samples with
+        fcapz_get_capture_samples, or read fcapz://last-capture /
+        fcapz_get_last_capture for the payload.
         """
 
         return await _with_progress(
@@ -2808,6 +2958,7 @@ def build_mcp_server(session: FcapzMcpSession):
         """
 
         return session.get_last_capture(max_bytes=max_bytes)
+
 
     @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=True)
     def fcapz_get_capture_samples(
@@ -2893,8 +3044,8 @@ def build_mcp_server(session: FcapzMcpSession):
         """Configure the connected ELA without arming it.
 
         config accepts the same capture fields as fcapz_capture. Use this to
-        stage a trigger, then fcapz_arm to arm once, fcapz_capture_status to
-        poll, and fcapz_capture_wait to read the result out — the manual flow
+        stage a trigger, then fcapz_arm to arm once and fcapz_capture_wait to
+        poll and read the result out (status_only=true to peek) — the manual flow
         that holds one hardware arm across many polls (fcapz_capture instead
         reconfigures and re-arms on every call). fcapz_disarm stops an arm.
         """
@@ -2915,29 +3066,39 @@ def build_mcp_server(session: FcapzMcpSession):
 
         return session.arm()
 
+    # Registered under --read-only too: its status-only mode is a pure read,
+    # and is the only way to watch a core someone else armed. So the hint is
+    # read-only exactly when the readout path is switched off.
     @tool(
-        requires=caps.allow_capture,
         destructiveHint=False,
         idempotentHint=False,
-        readOnlyHint=False,
+        readOnlyHint=not caps.allow_capture,
     )
     async def fcapz_capture_wait(
         timeout: float = 10.0,
         format: CaptureFormat = "json",
         include_event_summary: bool = False,
         segments: bool = False,
+        status_only: bool = False,
     ) -> JsonDict:
-        """Read out an already-armed capture without reconfiguring or re-arming.
+        """Wait for an armed capture and read it out, or just poll its state.
 
         Pairs with fcapz_configure + fcapz_arm: arm once, then poll here.
         timeout is in seconds (it may exceed --rpc-timeout, up to a 300 s server
         cap). If the trigger has not fired the tool returns
         {"triggered": false, "still_armed": true} rather than erroring, so it is
         safe to call in a poll loop; the core stays armed. On a hit it returns
-        summary metadata only — use fcapz_get_last_capture or
-        fcapz://last-capture for the full payload.
+        summary metadata only â€” page the data with fcapz_get_capture_samples.
+
+        status_only=true reads the capture state machine (armed / triggered /
+        done) without waiting or transferring samples; the other arguments
+        are then ignored. It is the one mode available under --read-only.
         """
 
+        if status_only:
+            import anyio.to_thread
+
+            return await anyio.to_thread.run_sync(session.capture_status)
         return await _with_progress(
             mcp.get_context(),
             "capture_wait",
@@ -2949,16 +3110,6 @@ def build_mcp_server(session: FcapzMcpSession):
             ),
             timeout,
         )
-
-    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=True)
-    def fcapz_capture_status() -> JsonDict:
-        """Poll an armed ELA without transferring samples.
-
-        Returns the capture FSM state (waiting-for-trigger vs. triggered) so an
-        agent can show progress before reading out with fcapz_capture_wait.
-        """
-
-        return session.capture_status()
 
     @tool(
         requires=caps.allow_capture,
@@ -2974,41 +3125,6 @@ def build_mcp_server(session: FcapzMcpSession):
         """
 
         return session.disarm()
-
-    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
-    def fcapz_eio_connect(
-        backend: Backend = "hw_server",
-        host: str | None = None,
-        port: int | None = None,
-        tap: str | None = None,
-        chain: int | None = None,
-        hardware: str | None = None,
-        quartus_stp: str | None = None,
-    ) -> JsonDict:
-        """Connect to an Embedded I/O core.
-
-        chain defaults by backend: 3 for hw_server/openocd, 0 for
-        usb_blaster. Pass chain explicitly for non-default JTAG USER chains,
-        Intel virtual JTAG instance indices, or managed core slots. Backend
-        fields mirror fcapz_connect: hardware/quartus_stp for Quartus USB
-        Blaster sessions.
-        """
-
-        return session.eio_connect(
-            backend=backend,
-            host=host,
-            port=port,
-            tap=tap,
-            chain=chain,
-            hardware=hardware,
-            quartus_stp=quartus_stp,
-        )
-
-    @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=False)
-    def fcapz_eio_close() -> JsonDict:
-        """Close the active EIO connection."""
-
-        return session.eio_close()
 
     @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=True)
     def fcapz_eio_read() -> JsonDict:
@@ -3036,47 +3152,20 @@ def build_mcp_server(session: FcapzMcpSession):
 
         return session.eio_write(value)
 
-    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
-    def fcapz_axi_connect(
-        backend: Backend = "hw_server",
-        host: str | None = None,
-        port: int | None = None,
-        tap: str | None = None,
-        chain: int | None = None,
-        hardware: str | None = None,
-        quartus_stp: str | None = None,
-    ) -> JsonDict:
-        """Connect to an eJTAG-to-AXI4 bridge.
-
-        chain defaults to 4. Backend fields mirror fcapz_connect and are
-        validated before reaching the RPC layer.
-        """
-
-        return session.axi_connect(
-            backend=backend,
-            host=host,
-            port=port,
-            tap=tap,
-            chain=chain,
-            hardware=hardware,
-            quartus_stp=quartus_stp,
-        )
-
-    @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=False)
-    def fcapz_axi_close() -> JsonDict:
-        """Close the active AXI bridge connection."""
-
-        return session.axi_close()
-
     @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=True)
-    def fcapz_axi_read(addr: int) -> JsonDict:
-        """Read one 32-bit AXI word from a byte address.
+    def fcapz_axi_read(
+        addr: int | str, count: int = 1, burst: bool = False
+    ) -> JsonDict:
+        """Read 32-bit words over the AXI bridge, starting at a byte address.
 
-        addr is an integer byte address, not a word index. Use decimal JSON
-        integers; convert hex strings such as "0x40000000" before calling.
+        addr is a byte address (not a word index), as an integer or a hex
+        string such as "0x40000000". count is in 32-bit words (default 1,
+        capped at 4096 per call â€” read larger regions in chunks at successive
+        addresses). burst=true uses the bridge's burst read path. The result
+        always carries `words` (hex strings); a one-word read adds `value`.
         """
 
-        return session.axi_read(addr)
+        return session.axi_read_words(addr, count, burst=burst)
 
     @tool(
         requires=caps.allow_axi_write,
@@ -3085,79 +3174,21 @@ def build_mcp_server(session: FcapzMcpSession):
         readOnlyHint=False,
     )
     def fcapz_axi_write(
-        addr: int,
-        data: int,
+        addr: int | str,
+        data: int | str | list[int | str],
         wstrb: int = 0xF,
-    ) -> JsonDict:
-        """Write one 32-bit AXI word when AXI write access is enabled.
-
-        addr is an integer byte address. data is a 32-bit integer word. wstrb is
-        a 4-bit integer byte-lane mask where bit 0 controls addr[7:0].
-        """
-
-        return session.axi_write(addr, data, wstrb)
-
-    @tool(
-        requires=caps.allow_axi_write,
-        destructiveHint=True,
-        idempotentHint=False,
-        readOnlyHint=False,
-    )
-    def fcapz_axi_write_block(
-        addr: int,
-        data: list[int],
         burst: bool = False,
     ) -> JsonDict:
-        """Write 32-bit AXI words starting at an integer byte address.
+        """Write 32-bit words over the AXI bridge, starting at a byte address.
 
-        data is a list of integer words (at most 4096 per call — split larger
-        writes into successive blocks). When burst is false, words are written
-        sequentially; when true, the bridge uses its burst write path.
+        addr is a byte address; data is one word or a list of words (at most
+        4096 per call), each an integer or a hex string. For a single word,
+        wstrb is the 4-bit byte-lane mask (bit 0 controls addr[7:0]); a list
+        writes whole words, sequentially or, with burst=true, through the
+        bridge's burst write path.
         """
 
-        return session.axi_write_block(addr, data, burst=burst)
-
-    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=True)
-    def fcapz_axi_dump(addr: int, count: int, burst: bool = False) -> JsonDict:
-        """Read count 32-bit AXI words starting at an integer byte address.
-
-        count is measured in 32-bit words, not bytes, and is capped at 4096 per
-        call — dump larger regions in chunks at successive addresses.
-        """
-
-        return session.axi_dump(addr, count, burst=burst)
-
-    @tool(destructiveHint=False, idempotentHint=False, readOnlyHint=False)
-    def fcapz_uart_connect(
-        backend: Backend = "hw_server",
-        host: str | None = None,
-        port: int | None = None,
-        tap: str | None = None,
-        chain: int | None = None,
-        hardware: str | None = None,
-        quartus_stp: str | None = None,
-    ) -> JsonDict:
-        """Connect to an eJTAG-UART bridge.
-
-        chain defaults to 4. Backend fields mirror fcapz_connect and are
-        validated before reaching the RPC layer.
-        """
-
-        return session.uart_connect(
-            backend=backend,
-            host=host,
-            port=port,
-            tap=tap,
-            chain=chain,
-            hardware=hardware,
-            quartus_stp=quartus_stp,
-        )
-
-    @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=False)
-    def fcapz_uart_close() -> JsonDict:
-        """Close the active UART bridge connection."""
-
-        return session.uart_close()
+        return session.axi_write_words(addr, data, wstrb=wstrb, burst=burst)
 
     @tool(
         requires=caps.allow_uart_send,
@@ -3249,7 +3280,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--allow-axi-write",
         action="store_true",
-        help="Allow fcapz_axi_write and fcapz_axi_write_block to modify AXI memory/registers",
+        help="Allow fcapz_axi_write to modify AXI memory/registers anywhere on the bus",
     )
     parser.add_argument(
         "--allow-uart-send",

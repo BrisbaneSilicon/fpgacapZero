@@ -93,9 +93,9 @@ also disables capture-side actions that change ELA state.
 
 | Flag | Effect |
 | --- | --- |
-| `--read-only` | Disables `fcapz_configure`, `fcapz_arm`, `fcapz_capture`, `fcapz_capture_wait`, `fcapz_disarm`, and all write/send/program enable flags. |
+| `--read-only` | Disables `fcapz_configure`, `fcapz_arm`, `fcapz_capture`, `fcapz_disarm`, the readout mode of `fcapz_capture_wait` (its `status_only` poll stays), and all write/send/program enable flags. |
 | `--allow-eio-write` | `fcapz_eio_write` |
-| `--allow-axi-write` | `fcapz_axi_write`, `fcapz_axi_write_block` |
+| `--allow-axi-write` | `fcapz_axi_write`, anywhere on the bus |
 | `--allow-uart-send` | `fcapz_uart_send` |
 | `--allow-program --bitfile-root DIR` | `fcapz_connect(program=...)` for `.bit` files under `DIR` |
 | `--probe-root DIR` | Capture config `probe_file` may read a probe map sitting directly in `DIR` |
@@ -221,15 +221,14 @@ same still-running worker guard applies.
 | Tool | Requires | Purpose |
 | --- | --- | --- |
 | `fcapz_status` | always available | Return session state, safety capabilities, MCP server version, and RPC schema version. |
-| `fcapz_connect` | none for plain connect; `--allow-program` if `program=` or a caller-supplied `quartus_stp=` is set | Connect to an ELA core. `chain` selects the JTAG USER chain (omit to autodetect). |
-| `fcapz_close` | always available | Close the **whole board session** — the ELA plus any EIO/AXI/UART controller. Idempotent, and runs even when only a side subsystem is open. |
+| `fcapz_connect` | none for plain connect; `--allow-program` if `program=` or a caller-supplied `quartus_stp=` is set | Connect to a debug core: `core` is `"ela"` (default), `"eio"`, `"axi"` or `"uart"`. `chain` selects the JTAG USER chain (ELA: omit to autodetect; EIO: 3, or 0 on `usb_blaster`; AXI/UART: 4). |
+| `fcapz_close` | always available | `core="all"` (default) closes the **whole board session** — the ELA plus any EIO/AXI/UART controller; `"eio"`, `"axi"` or `"uart"` closes just that core. Idempotent. |
 | `fcapz_probe` | connected ELA | Read ELA identity, dimensions, and feature registers. |
 | `fcapz_list_cores` | connected ELA | List debug cores on the board (type, JTAG `chain`, identity) so an agent can pick the right chain for side connects. |
 | `fcapz_configure` | capture* | Configure the connected ELA without arming. |
 | `fcapz_arm` | capture* | Arm the connected ELA using the current hardware configuration. |
 | `fcapz_capture` | capture* | Configure, arm, capture, and cache the full capture payload. Returns summary metadata only. |
-| `fcapz_capture_wait` | capture* | Read out an already-armed capture (from `fcapz_configure` + `fcapz_arm`) without reconfiguring or re-arming. Returns `{triggered: false, still_armed: true}` (not an error) if the trigger has not fired yet. |
-| `fcapz_capture_status` | capture* | Poll an armed ELA without transferring samples (waiting-for-trigger vs. triggered). |
+| `fcapz_capture_wait` | capture* (readout); always (`status_only`) | Read out an already-armed capture (from `fcapz_configure` + `fcapz_arm`) without reconfiguring or re-arming. Returns `{triggered: false, still_armed: true}` (not an error) if the trigger has not fired yet. `status_only=true` reads the capture FSM state without waiting or transferring samples. |
 | `fcapz_disarm` | capture* | Soft-reset the capture FSM to idle, discarding any in-flight arm. |
 | `fcapz_get_last_capture` | always available | Return the cached full capture payload for clients without resource support. Defaults to a 1 MiB guard, capped at 8 MiB. |
 | `fcapz_get_capture_samples` | always available | Page the cached capture's samples as whole records, with named fields from the probe map. See [Reading a Capture](#reading-a-capture). |
@@ -243,15 +242,15 @@ same still-running worker guard applies.
 out of the tool list entirely, rather than offered and then refused: the agent
 would otherwise plan around it, spend a call discovering the refusal, and pay
 for its schema in every request. So the advertised surface tracks the flags —
-22 tools under `--read-only`, 27 by default, 31 with every write enabled. The
+15 tools under `--read-only`, 19 by default, 22 with every write enabled. The
 session-level permission checks remain as the actual enforcement; the gating
 is about what the agent is told exists.
 
 Two capture flows are available. `fcapz_capture` is the one-shot path: it
 configures, arms, and reads out in a single call, re-arming every time. For a
 long wait on a real hardware event, use the manual flow instead —
-`fcapz_configure`, then `fcapz_arm` once, then `fcapz_capture_status` to poll
-and `fcapz_capture_wait` to read out — so a single hardware arm is held across
+`fcapz_configure`, then `fcapz_arm` once, then `fcapz_capture_wait` to poll
+and read out (`status_only=true` to peek without a readout) — so a single hardware arm is held across
 many short polls with no re-arm blind gaps. `fcapz_capture_wait` returns
 `{triggered: false, still_armed: true}` when its `timeout` expires before the
 trigger fires, so the poll loop treats "not yet" as data rather than an error;
@@ -319,38 +318,40 @@ Valid `config` keys for `fcapz_capture` and `fcapz_configure` are:
 
 ### Embedded I/O
 
+Open the core with `fcapz_connect(core="eio")` and close it with
+`fcapz_close(core="eio")`.
+
 | Tool | Purpose |
 | --- | --- |
-| `fcapz_eio_connect` | Connect to an EIO core. |
-| `fcapz_eio_close` | Close the active EIO connection. Idempotent. |
 | `fcapz_eio_read` | Read the current EIO input vector and cache the response. |
 | `fcapz_eio_write` | Write the EIO output vector when `--allow-eio-write` is set. |
 
 ### JTAG-to-AXI4
 
+Open the bridge with `fcapz_connect(core="axi")` and close it with
+`fcapz_close(core="axi")`.
+
 | Tool | Purpose |
 | --- | --- |
-| `fcapz_axi_connect` | Connect to an eJTAG-to-AXI4 bridge. |
-| `fcapz_axi_close` | Close the AXI bridge connection. Idempotent. |
-| `fcapz_axi_read` | Read one 32-bit AXI word. |
-| `fcapz_axi_write` | Write one 32-bit AXI word when `--allow-axi-write` is set. |
-| `fcapz_axi_write_block` | Write a sequence of 32-bit AXI words when `--allow-axi-write` is set. |
-| `fcapz_axi_dump` | Read a sequence of 32-bit AXI words. |
+| `fcapz_axi_read` | Read `count` 32-bit words (default 1) from a byte address; `burst=true` uses the burst path. Always returns `words`, plus `value` for one word. |
+| `fcapz_axi_write` | Write one word (with a `wstrb` byte-lane mask) or a list of words (`burst=true` for the burst path) when `--allow-axi-write` is set. |
 
-AXI MCP schemas use integer byte addresses and integer 32-bit data words. Convert
-hex strings such as `"0x40000000"` to JSON integers before calling. `count` is
-measured in 32-bit words, not bytes. `wstrb` is a 4-bit integer byte-lane mask;
-bit 0 controls the lowest byte. `fcapz_axi_dump` and `fcapz_axi_write_block` are
-capped at **4096 words per call** — both to bound the JTAG round-trip against the
+Addresses are byte addresses and data are 32-bit words; both accept a JSON
+integer or a base-prefixed string such as `"0x40000000"`, and anything outside
+32 bits is rejected. `count` is measured in 32-bit words, not bytes. `wstrb` is
+a 4-bit byte-lane mask (bit 0 controls the lowest byte) and applies to a
+single-word write only. Reads and block writes are capped at **4096 words per
+call** — both to bound the JTAG round-trip against the
 watchdog and to keep a dump from flooding model context; transfer larger regions
 in chunks at successive addresses.
 
 ### eJTAG-UART
 
+Open the bridge with `fcapz_connect(core="uart")` and close it with
+`fcapz_close(core="uart")`.
+
 | Tool | Purpose |
 | --- | --- |
-| `fcapz_uart_connect` | Connect to an eJTAG-UART bridge. |
-| `fcapz_uart_close` | Close the UART bridge connection. Idempotent. |
 | `fcapz_uart_send` | Send bytes when `--allow-uart-send` is set. |
 | `fcapz_uart_recv` | Receive bytes. |
 | `fcapz_uart_status` | Return UART bridge status counters and FIFO state. |
@@ -678,17 +679,18 @@ fcapz_close()
 AXI read:
 
 ```text
-fcapz_axi_connect(backend="hw_server", chain=4)
-fcapz_axi_read(addr=1073741824)  # 0x40000000
-fcapz_axi_close()
+fcapz_connect(core="axi", backend="hw_server", chain=4)
+fcapz_axi_read(addr="0x40000000")
+fcapz_axi_read(addr="0x40000000", count=16)
+fcapz_close(core="axi")
 ```
 
 UART receive:
 
 ```text
-fcapz_uart_connect(backend="hw_server", chain=4)
+fcapz_connect(core="uart", backend="hw_server", chain=4)
 fcapz_uart_recv(count=256, timeout=0.5)
-fcapz_uart_close()
+fcapz_close(core="uart")
 ```
 
 ## Troubleshooting

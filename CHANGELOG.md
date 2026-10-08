@@ -154,6 +154,23 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **MCP — fewer, broader tools.** The surface shrinks from 31 tools to 22,
+  cutting the schema every request carries. The read/write split stays, so
+  annotations and capability gating are unchanged:
+
+  | Before | Now |
+  | --- | --- |
+  | `fcapz_eio_connect` / `fcapz_axi_connect` / `fcapz_uart_connect` | `fcapz_connect(core="eio" \| "axi" \| "uart")` |
+  | `fcapz_eio_close` / `fcapz_axi_close` / `fcapz_uart_close` | `fcapz_close(core="eio" \| "axi" \| "uart")`; `core="all"` (default) is the old `fcapz_close` |
+  | `fcapz_capture_status` | `fcapz_capture_wait(status_only=true)`, still available under `--read-only` |
+  | `fcapz_axi_dump` | `fcapz_axi_read(addr, count=N, burst=...)` |
+  | `fcapz_axi_write_block` | `fcapz_axi_write(addr, data=[...], burst=...)` |
+
+  `fcapz_axi_read` always returns `words` (plus `value` for one word), and
+  AXI addresses and data now also accept hex strings such as `"0x40000000"`;
+  values outside 32 bits are rejected. ELA-only fields (`program`,
+  `single_chain_burst`) are refused for the other cores rather than ignored.
+
 - **RPC — some refusals report a narrower `type` string.** The error
   envelope carries `exc.__class__.__name__`, and refusals that were bare
   `RuntimeError`s are now `NotConnectedError` / `NotEnabledError` (both
@@ -405,7 +422,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **The MCP tool list now tracks the safety flags.** A tool whose capability
   is disabled is no longer advertised and then refused — it is left out of the
   list, so an agent neither plans around it nor pays for its schema in every
-  request (22 tools under `--read-only`, 27 by default, 31 with all writes
+  request (15 tools under `--read-only`, 19 by default, 22 with all writes
   enabled). The session-level permission checks are unchanged and remain the
   enforcement.
 

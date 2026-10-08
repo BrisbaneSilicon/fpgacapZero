@@ -1100,12 +1100,10 @@ class FcapzMcpSessionTests(unittest.TestCase):
         writes = {
             "fcapz_eio_write",
             "fcapz_axi_write",
-            "fcapz_axi_write_block",
             "fcapz_uart_send",
         }
         capture = {
             "fcapz_capture",
-            "fcapz_capture_wait",
             "fcapz_configure",
             "fcapz_arm",
             "fcapz_disarm",
@@ -1120,7 +1118,10 @@ class FcapzMcpSessionTests(unittest.TestCase):
         # Read-only still exposes the read side.
         self.assertIn("fcapz_probe", read_only)
         self.assertIn("fcapz_axi_read", read_only)
-        self.assertIn("fcapz_capture_status", read_only)
+        # capture_wait stays for its status-only mode, and says it is a
+        # pure read when that is all it can do.
+        self.assertIn("fcapz_capture_wait", read_only)
+        self.assertIn("fcapz_capture_wait", default)
 
         self.assertTrue(writes <= names(
             allow_eio_write=True, allow_axi_write=True, allow_uart_send=True
@@ -1168,22 +1169,13 @@ class FcapzMcpSessionTests(unittest.TestCase):
                 "fcapz_configure",
                 "fcapz_arm",
                 "fcapz_capture_wait",
-                "fcapz_capture_status",
                 "fcapz_disarm",
-                "fcapz_eio_connect",
-                "fcapz_eio_close",
                 "fcapz_eio_read",
                 "fcapz_eio_write",
-                "fcapz_axi_connect",
-                "fcapz_axi_close",
                 "fcapz_axi_read",
                 "fcapz_axi_write",
-                "fcapz_axi_write_block",
-                "fcapz_axi_dump",
                 "fcapz_axi_transactions",
                 "fcapz_get_capture_samples",
-                "fcapz_uart_connect",
-                "fcapz_uart_close",
                 "fcapz_uart_send",
                 "fcapz_uart_recv",
                 "fcapz_uart_status",
@@ -1199,9 +1191,18 @@ class FcapzMcpSessionTests(unittest.TestCase):
         self.assertFalse(tools["fcapz_capture_wait"].annotations.readOnlyHint)
         self.assertTrue(tools["fcapz_disarm"].annotations.destructiveHint)
         self.assertTrue(tools["fcapz_list_cores"].annotations.readOnlyHint)
+        # Hex addresses are accepted as strings, so the schema offers both.
+        addr_types = {
+            branch["type"]
+            for branch in tools["fcapz_axi_read"].inputSchema["properties"]["addr"]["anyOf"]
+        }
+        self.assertEqual(addr_types, {"integer", "string"})
         self.assertEqual(
-            tools["fcapz_axi_read"].inputSchema["properties"]["addr"]["type"],
-            "integer",
+            tools["fcapz_connect"].inputSchema["properties"]["core"]["enum"],
+            ["ela", "eio", "axi", "uart"],
+        )
+        self.assertEqual(
+            tools["fcapz_close"].inputSchema["properties"]["core"]["default"], "all"
         )
         self.assertEqual(
             tools["fcapz_axi_write"].inputSchema["properties"]["wstrb"]["default"],
@@ -2926,6 +2927,118 @@ class FullCaptureCeilingTests(unittest.TestCase):
 
         self.assertGreater(_MAX_FULL_CAPTURE_BYTES, _DEFAULT_FULL_CAPTURE_MAX_BYTES)
         self.assertLessEqual(_MAX_FULL_CAPTURE_BYTES, 16 * 1024 * 1024)
+
+
+
+class ConsolidatedToolTests(unittest.TestCase):
+    """One connect/close, one AXI read and one AXI write for every core."""
+
+    def _session(self, **caps):
+        return FcapzMcpSession(rpc=FakeRpc(), capabilities=McpCapabilities(**caps))
+
+    def test_connect_core_dispatches_with_each_cores_chain_default(self):
+        session = self._session()
+        session.connect_core("eio", backend="usb_blaster")
+        session.connect_core("axi")
+        session.connect_core("uart", chain=2)
+        session.connect_core()  # the ELA
+
+        by_cmd = {req["cmd"]: req for req in session.rpc.requests}
+        self.assertEqual(by_cmd["eio_connect"]["chain"], 0)
+        self.assertEqual(by_cmd["axi_connect"]["chain"], 4)
+        self.assertEqual(by_cmd["uart_connect"]["chain"], 2)
+        self.assertNotIn("chain", by_cmd["connect"])
+        status = session.status()
+        self.assertTrue(
+            status["connected"] and status["eio_connected"]
+            and status["axi_connected"] and status["uart_connected"]
+        )
+
+    def test_ela_only_fields_are_refused_for_other_cores(self):
+        # Ignoring them would report success for a program that never ran.
+        session = self._session(allow_program=True)
+        with self.assertRaisesRegex(ValueError, "core='ela' only"):
+            session.connect_core("axi", program="x.bit")
+        with self.assertRaisesRegex(ValueError, "core='ela' only"):
+            session.connect_core("eio", single_chain_burst=False)
+        with self.assertRaisesRegex(ValueError, "core must be"):
+            session.connect_core("dma")
+        self.assertEqual(session.rpc.requests, [])
+
+    def test_close_core_closes_one_core_or_the_whole_session(self):
+        session = self._session()
+        session.connect_core()
+        session.connect_core("axi")
+        session.close_core("axi")
+        self.assertFalse(session.status()["axi_connected"])
+        self.assertTrue(session.status()["connected"])
+
+        with self.assertRaisesRegex(ValueError, "core='all'"):
+            session.close_core("ela")
+
+        session.close_core()
+        self.assertFalse(session.status()["connected"])
+        self.assertEqual(session.rpc.requests[-1]["cmd"], "close")
+
+    def test_axi_read_words_has_one_shape_for_a_word_and_a_block(self):
+        session = self._session()
+        one = session.axi_read_words("0x40000000")
+        self.assertEqual(one["words"], ["0x12345678"])
+        self.assertEqual(one["value"], "0x12345678")
+        self.assertEqual(one["addr"], "0x40000000")
+        self.assertEqual(session.rpc.requests[-1], {"cmd": "axi_read", "addr": 0x40000000})
+
+        block = session.axi_read_words(16, 3, burst=True)
+        self.assertEqual(block["words"], ["0x00000001"])
+        self.assertEqual(
+            session.rpc.requests[-1],
+            {"cmd": "axi_dump", "addr": 16, "count": 3, "burst": True},
+        )
+        with self.assertRaisesRegex(ValueError, "count must be >= 1"):
+            session.axi_read_words(0, 0)
+        with self.assertRaisesRegex(ValueError, "32 bits"):
+            session.axi_read_words(1 << 32)
+        with self.assertRaisesRegex(ValueError, "base-prefixed"):
+            session.axi_read_words("forty")
+
+    def test_axi_write_words_routes_a_word_and_a_list(self):
+        session = self._session(allow_axi_write=True)
+        session.axi_write_words("0x10", "0xdeadbeef", wstrb=0x3)
+        self.assertEqual(
+            session.rpc.requests[-1],
+            {"cmd": "axi_write", "addr": 16, "data": 0xDEADBEEF, "wstrb": 3},
+        )
+        session.axi_write_words(32, [1, "0x2"], burst=True)
+        self.assertEqual(
+            session.rpc.requests[-1],
+            {"cmd": "axi_write_block", "addr": 32, "data": [1, 2], "burst": True},
+        )
+        with self.assertRaisesRegex(ValueError, "single-word"):
+            session.axi_write_words(0, [1, 2], wstrb=0x1)
+        with self.assertRaisesRegex(ValueError, "block write"):
+            session.axi_write_words(0, 1, burst=True)
+        with self.assertRaisesRegex(ValueError, "empty"):
+            session.axi_write_words(0, [])
+
+    @unittest.skipUnless(importlib.util.find_spec("mcp"), "mcp SDK not installed")
+    def test_capture_wait_status_only_works_under_read_only(self):
+        from fcapz.mcp_server import build_mcp_server
+
+        session = self._session(allow_capture=False)
+        app = build_mcp_server(session)
+        tools = {tool.name: tool for tool in asyncio.run(app.list_tools())}
+        self.assertTrue(tools["fcapz_capture_wait"].annotations.readOnlyHint)
+
+        _, structured = asyncio.run(
+            app.call_tool("fcapz_capture_wait", {"status_only": True})
+        )
+        self.assertEqual(structured["state"], "waiting")
+        self.assertEqual(session.rpc.requests[-1], {"cmd": "capture_status"})
+
+        # The readout path is still refused: it is a capture operation.
+        with self.assertRaises(Exception) as caught:
+            asyncio.run(app.call_tool("fcapz_capture_wait", {}))
+        self.assertEqual(json.loads(str(caught.exception))["code"], "not_permitted")
 
 
 if __name__ == "__main__":
