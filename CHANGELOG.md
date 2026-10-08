@@ -9,6 +9,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **MCP — authenticated HTTP transport.** `fcapz-mcp --transport http` serves
+  streamable HTTP at `/mcp` for a remote bench. Every request needs
+  `Authorization: Bearer <token>`, with the token taken from
+  `FCAPZ_MCP_TOKEN` or `--http-token-file` (never the command line; at least
+  16 characters). It listens on `127.0.0.1:8765` by default
+  (`--http-host`/`--http-port`); a non-loopback address requires TLS
+  (`--http-tls-cert`/`--http-tls-key`) or an explicit `--http-insecure`. All
+  HTTP clients share the one hardware session.
+
 - **MCP — `--axi-write-range LO:HI` confines AXI writes.** Repeatable; it
   implies `--allow-axi-write` but only for the named inclusive byte ranges,
   so an agent can be given a peripheral's register window rather than the

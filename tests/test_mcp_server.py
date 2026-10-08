@@ -3285,5 +3285,135 @@ class AxiWriteRangeTests(unittest.TestCase):
                         main(argv)
 
 
+
+class HttpTransportTests(unittest.TestCase):
+    """--transport http: a bearer token on every request, TLS off loopback."""
+
+    TOKEN = "t0ken-for-tests-0123456789"
+
+    def _main(self, argv, env=None):
+        """Run main() with the server loop stubbed; return its keywords."""
+        seen = {}
+
+        async def fake_serve(server, **kwargs):
+            seen.update(kwargs, server=server)
+
+        environ = {} if env is None else env
+        with patch.dict(os.environ, environ, clear=False):
+            if env is None:
+                os.environ.pop("FCAPZ_MCP_TOKEN", None)
+            with patch.object(mcp_server, "_serve_http", fake_serve):
+                with patch.object(FcapzMcpSession, "shutdown") as shutdown:
+                    with redirect_stderr(io.StringIO()):
+                        code = main(argv)
+        return code, seen, shutdown
+
+    def test_http_mode_takes_the_token_from_the_environment(self):
+        code, seen, shutdown = self._main(
+            ["--transport", "http"], env={"FCAPZ_MCP_TOKEN": self.TOKEN}
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            (seen["host"], seen["port"], seen["token"]), ("127.0.0.1", 8765, self.TOKEN)
+        )
+        shutdown.assert_called_once()
+
+    def test_http_mode_takes_the_token_from_a_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            token_file = Path(tmp) / "token"
+            token_file.write_text(self.TOKEN + "\n", encoding="utf-8")
+            code, seen, _ = self._main(
+                ["--transport", "http", "--http-token-file", str(token_file),
+                 "--http-port", "9000"]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual((seen["token"], seen["port"]), (self.TOKEN, 9000))
+
+    def test_http_refusals(self):
+        cases = [
+            (["--transport", "http"], None),  # no token at all
+            (["--transport", "http"], {"FCAPZ_MCP_TOKEN": "short"}),
+            (["--http-port", "9000"], None),  # an HTTP flag without HTTP
+            (["--transport", "http", "--http-host", "0.0.0.0"],
+             {"FCAPZ_MCP_TOKEN": self.TOKEN}),  # network bind, no TLS
+            (["--transport", "http", "--http-tls-cert", "c.pem"],
+             {"FCAPZ_MCP_TOKEN": self.TOKEN}),  # cert without key
+            (["--transport", "http", "--http-port", "0"],
+             {"FCAPZ_MCP_TOKEN": self.TOKEN}),
+        ]
+        for argv, env in cases:
+            with self.subTest(argv=argv, env=env):
+                with self.assertRaises(SystemExit):
+                    self._main(argv, env=env)
+
+    def test_a_network_bind_is_allowed_when_explicitly_insecure(self):
+        code, seen, _ = self._main(
+            ["--transport", "http", "--http-host", "0.0.0.0", "--http-insecure"],
+            env={"FCAPZ_MCP_TOKEN": self.TOKEN},
+        )
+        self.assertEqual((code, seen["host"]), (0, "0.0.0.0"))
+
+    @unittest.skipUnless(importlib.util.find_spec("mcp"), "mcp SDK not installed")
+    def test_the_middleware_demands_the_token_on_every_request(self):
+        from starlette.testclient import TestClient
+
+        from fcapz.mcp_server import _BearerAuth, build_mcp_server
+
+        server = build_mcp_server(FcapzMcpSession(rpc=FakeRpc()))
+        app = _BearerAuth(server.streamable_http_app(), self.TOKEN)
+        # 127.0.0.1:PORT, not TestClient's "testserver": the loopback bind's
+        # DNS-rebinding allowlist would answer 421 to anything else.
+        with TestClient(app, base_url="http://127.0.0.1:8765") as client:
+            for method in ("get", "post", "delete"):
+                with self.subTest(method=method):
+                    bare = client.request(method, "/mcp")
+                    self.assertEqual(bare.status_code, 401)
+                    self.assertIn("Bearer", bare.headers["www-authenticate"])
+
+            wrong = client.post("/mcp", headers={"Authorization": "Bearer nope"})
+            self.assertEqual(wrong.status_code, 401)
+            basic = client.post("/mcp", headers={"Authorization": f"Basic {self.TOKEN}"})
+            self.assertEqual(basic.status_code, 401)
+
+            # The scheme is case-insensitive; past auth, the MCP layer answers
+            # (a bare POST without the streaming Accept header is a 4xx of
+            # its own, but not 401).
+            right = client.post(
+                "/mcp", headers={"Authorization": f"bearer {self.TOKEN}"}
+            )
+            self.assertNotIn(right.status_code, (401, 421))
+
+    @unittest.skipUnless(importlib.util.find_spec("mcp"), "mcp SDK not installed")
+    def test_the_middleware_completes_an_mcp_initialize(self):
+        from starlette.testclient import TestClient
+
+        from fcapz.mcp_server import _BearerAuth, build_mcp_server
+
+        server = build_mcp_server(FcapzMcpSession(rpc=FakeRpc()))
+        app = _BearerAuth(server.streamable_http_app(), self.TOKEN)
+        init = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0"},
+            },
+        }
+        with TestClient(app, base_url="http://127.0.0.1:8765") as client:
+            response = client.post(
+                "/mcp",
+                json=init,
+                headers={
+                    "Authorization": f"Bearer {self.TOKEN}",
+                    "Accept": "application/json, text/event-stream",
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("fpgacapZero", response.text)
+        self.assertTrue(response.headers.get("mcp-session-id"))
+
+
 if __name__ == "__main__":
     unittest.main()

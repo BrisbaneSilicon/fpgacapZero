@@ -14,6 +14,7 @@ import base64
 import binascii
 import errno
 import functools
+import hmac
 import importlib.metadata
 import inspect
 import math
@@ -3039,11 +3040,16 @@ class FcapzMcpSession:
         owner.join(timeout=self.capabilities.rpc_cancel_grace_sec)
 
 
-def build_mcp_server(session: FcapzMcpSession):
+def build_mcp_server(
+    session: FcapzMcpSession, *, host: str = "127.0.0.1", port: int = 8000
+):
     """Build and return a FastMCP app.
 
     Kept separate so unit tests can cover :class:`FcapzMcpSession` without the
-    optional MCP SDK installed.
+    optional MCP SDK installed. `host`/`port` only matter for HTTP, but they
+    have to be known here: FastMCP derives its DNS-rebinding policy from the
+    host at construction (loopback gets a Host-header allowlist; any other
+    bind gets none, and relies on the bearer token).
     """
 
     try:
@@ -3112,7 +3118,7 @@ def build_mcp_server(session: FcapzMcpSession):
                     json.dumps(body, ensure_ascii=False, sort_keys=True)
                 ) from exc
 
-    mcp = _CodedFastMCP("fpgacapZero")
+    mcp = _CodedFastMCP("fpgacapZero", host=host, port=port)
 
     def tool(*, requires: bool = True, **annotations: Any):
         """Register a tool, unless its capability is switched off.
@@ -3634,6 +3640,124 @@ def build_mcp_server(session: FcapzMcpSession):
     return mcp
 
 
+# Name of the environment variable that may carry the HTTP bearer token. A
+# command-line flag would put the secret in every process listing.
+_TOKEN_ENV = "FCAPZ_MCP_TOKEN"
+_MIN_TOKEN_CHARS = 16
+
+
+class _BearerAuth:
+    """ASGI middleware: every HTTP request must carry the server's token.
+
+    Streamable HTTP uses GET (the event stream), POST and DELETE on one path,
+    so this checks every method rather than one route. Lifespan events pass
+    through untouched -- the MCP session manager starts there -- and anything
+    else (a websocket) is closed: nothing on this server speaks it.
+    """
+
+    def __init__(self, app: Any, token: str) -> None:
+        self.app = app
+        self._token = token.encode("utf-8")
+
+    async def __call__(self, scope: JsonDict, receive: Any, send: Any) -> None:
+        kind = scope.get("type")
+        if kind == "lifespan":
+            await self.app(scope, receive, send)
+            return
+        if kind != "http":
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        if self._authorized(scope):
+            await self.app(scope, receive, send)
+            return
+        body = json.dumps(
+            {"error": "unauthorized", "message": "missing or wrong bearer token"}
+        ).encode("utf-8")
+        await send({
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode("ascii")),
+                (b"www-authenticate", b'Bearer realm="fcapz-mcp"'),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+    def _authorized(self, scope: JsonDict) -> bool:
+        values = [v for k, v in scope.get("headers") or () if k.lower() == b"authorization"]
+        if len(values) != 1:
+            # Two Authorization headers is a request trying something.
+            return False
+        scheme, _, presented = values[0].strip().partition(b" ")
+        if scheme.lower() != b"bearer":
+            return False
+        # Constant time, so the comparison does not leak the token a byte at
+        # a time to anyone who can time the 401.
+        return hmac.compare_digest(presented.strip(), self._token)
+
+
+async def _serve_http(
+    server: Any,
+    *,
+    host: str,
+    port: int,
+    token: str,
+    ssl_certfile: Path | None = None,
+    ssl_keyfile: Path | None = None,
+) -> None:
+    """Serve MCP over streamable HTTP until interrupted.
+
+    FastMCP's own HTTP runner has no TLS options and no middleware hook, and
+    its built-in auth is OAuth resource-server plumbing that wants an issuer.
+    A shared bearer token over TLS is what a bench server needs, so the app
+    is wrapped and served here.
+    """
+    import uvicorn
+
+    app = _BearerAuth(server.streamable_http_app(), token)
+    config = uvicorn.Config(
+        app,
+        host=host,
+        port=port,
+        ssl_certfile=str(ssl_certfile) if ssl_certfile else None,
+        ssl_keyfile=str(ssl_keyfile) if ssl_keyfile else None,
+        log_level="warning",
+    )
+    scheme = "https" if ssl_certfile else "http"
+    shown = f"[{host}]" if ":" in host else host
+    print(
+        f"fcapz-mcp: serving MCP at {scheme}://{shown}:{port}/mcp",
+        file=sys.stderr,
+        flush=True,
+    )
+    await uvicorn.Server(config).serve()
+
+
+def _http_token(parser: argparse.ArgumentParser, args: argparse.Namespace) -> str:
+    if args.http_token_file is not None:
+        try:
+            token = args.http_token_file.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            parser.error(f"--http-token-file: {exc}")
+        source = "--http-token-file"
+    else:
+        token = os.environ.get(_TOKEN_ENV, "").strip()
+        source = _TOKEN_ENV
+    if not token:
+        parser.error(
+            f"--transport http needs a bearer token: set {_TOKEN_ENV} or pass "
+            "--http-token-file FILE"
+        )
+    if len(token) < _MIN_TOKEN_CHARS or any(c.isspace() for c in token):
+        parser.error(
+            f"the token from {source} must be at least {_MIN_TOKEN_CHARS} "
+            "characters with no whitespace (e.g. python -c \"import secrets; "
+            "print(secrets.token_urlsafe(32))\")"
+        )
+    return token
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="fcapz-mcp",
@@ -3735,7 +3859,106 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SEC",
         help="Seconds to wait for an RPC worker to unwind after backend cancellation",
     )
+    http = parser.add_argument_group(
+        "HTTP transport",
+        "Serve MCP over streamable HTTP for a remote bench. Every request must "
+        f"carry 'Authorization: Bearer <token>'; the token comes from "
+        f"${_TOKEN_ENV} or --http-token-file, never the command line",
+    )
+    http.add_argument(
+        "--transport",
+        choices=("stdio", "http"),
+        default="stdio",
+        help="MCP transport (default: stdio)",
+    )
+    http.add_argument(
+        "--http-host",
+        default=None,
+        metavar="ADDR",
+        help=(
+            "Address the HTTP server listens on (default 127.0.0.1). Not to be "
+            "confused with --allow-host, which is about backend daemons. A "
+            "non-loopback address needs TLS or --http-insecure"
+        ),
+    )
+    http.add_argument(
+        "--http-port",
+        type=int,
+        default=None,
+        metavar="PORT",
+        help="TCP port for the HTTP server (default 8765)",
+    )
+    http.add_argument(
+        "--http-token-file",
+        type=Path,
+        default=None,
+        metavar="FILE",
+        help=f"Read the bearer token from FILE instead of ${_TOKEN_ENV}",
+    )
+    http.add_argument(
+        "--http-tls-cert",
+        type=Path,
+        default=None,
+        metavar="PEM",
+        help="Serve HTTPS with this certificate (needs --http-tls-key)",
+    )
+    http.add_argument(
+        "--http-tls-key",
+        type=Path,
+        default=None,
+        metavar="PEM",
+        help="Private key for --http-tls-cert",
+    )
+    http.add_argument(
+        "--http-insecure",
+        action="store_true",
+        help=(
+            "Allow plain HTTP on a non-loopback address. The token then "
+            "crosses the network in clear text; prefer TLS or an SSH tunnel"
+        ),
+    )
     return parser
+
+
+_HTTP_ONLY_FLAGS = (
+    ("http_host", "--http-host"),
+    ("http_port", "--http-port"),
+    ("http_token_file", "--http-token-file"),
+    ("http_tls_cert", "--http-tls-cert"),
+    ("http_tls_key", "--http-tls-key"),
+    ("http_insecure", "--http-insecure"),
+)
+
+
+def _validated_http(parser: argparse.ArgumentParser, args: argparse.Namespace) -> JsonDict:
+    """Check the HTTP flags together; returns the _serve_http keywords."""
+    if args.transport != "http":
+        stray = [flag for dest, flag in _HTTP_ONLY_FLAGS if getattr(args, dest)]
+        if stray:
+            parser.error(f"{', '.join(stray)} need(s) --transport http")
+        return {}
+    host = args.http_host or "127.0.0.1"
+    port = 8765 if args.http_port is None else args.http_port
+    if not 0 < port < 65536:
+        parser.error(f"--http-port must be 1..65535, got {port}")
+    if (args.http_tls_cert is None) != (args.http_tls_key is None):
+        parser.error("--http-tls-cert and --http-tls-key go together")
+    for path in (args.http_tls_cert, args.http_tls_key):
+        if path is not None and not path.is_file():
+            parser.error(f"TLS file not found: {path}")
+    loopback = host in FcapzMcpSession._LOOPBACK_HOSTS
+    if not loopback and args.http_tls_cert is None and not args.http_insecure:
+        parser.error(
+            f"--http-host {host} is reachable from the network; serve TLS "
+            "(--http-tls-cert/--http-tls-key) or pass --http-insecure"
+        )
+    return {
+        "host": host,
+        "port": port,
+        "token": _http_token(parser, args),
+        "ssl_certfile": args.http_tls_cert,
+        "ssl_keyfile": args.http_tls_key,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -3759,6 +3982,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--rpc-timeout must be a finite number > 0")
     if not args.rpc_cancel_grace > 0 or not math.isfinite(args.rpc_cancel_grace):
         parser.error("--rpc-cancel-grace must be a finite number > 0")
+    http = _validated_http(parser, args)
     capabilities = McpCapabilities(
         allow_capture=not args.read_only,
         probe_root=args.probe_root,
@@ -3775,10 +3999,16 @@ def main(argv: list[str] | None = None) -> int:
         rpc_cancel_grace_sec=float(args.rpc_cancel_grace),
     )
     session = FcapzMcpSession(capabilities=capabilities)
-    server = build_mcp_server(session)
-    run: Callable[..., Any] = server.run
     try:
-        run(transport="stdio")
+        if http:
+            import anyio
+
+            server = build_mcp_server(session, host=http["host"], port=http["port"])
+            anyio.run(functools.partial(_serve_http, server, **http))
+        else:
+            server = build_mcp_server(session)
+            run: Callable[..., Any] = server.run
+            run(transport="stdio")
     except Exception as exc:
         print(f"fcapz-mcp: {exc}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)

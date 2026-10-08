@@ -36,13 +36,50 @@ fcapz-mcp --help
 
 ## Transport Model
 
-`fcapz-mcp` currently runs MCP over stdio. One server process owns one hardware
-session and should be connected to one MCP client. If you need two agents or two
-clients at the same time, run two separate `fcapz-mcp` processes.
+`fcapz-mcp` speaks MCP over **stdio** (the default) or **streamable HTTP**
+(`--transport http`). Either way one server process owns one hardware
+session: a single `FcapzMcpSession`, which can hold ELA, EIO, AXI, and UART
+connections.
 
-The server creates one `FcapzMcpSession`, which can hold ELA, EIO, AXI, and UART
-connections. On stdio disconnect or normal server exit, the session attempts to
-close all active hardware connections.
+- **stdio** — the MCP client launches the server and is its only client. On
+  stdio disconnect or normal server exit, the session closes every active
+  hardware connection. Run a second `fcapz-mcp` process for a second client.
+- **HTTP** — for a bench machine an agent reaches over the network. Every
+  client that holds the token shares the *same* hardware session: one
+  client's `fcapz_connect` is the other's open board, and a call made while
+  another client's capture runs is refused with `busy`. A client
+  disconnecting closes nothing; only server exit does.
+
+### HTTP mode
+
+Every request must carry `Authorization: Bearer <token>`; anything else is
+answered `401` before it reaches MCP. The token comes from the
+`FCAPZ_MCP_TOKEN` environment variable or `--http-token-file FILE` — never a
+command-line flag, which would put it in the process list — and must be at
+least 16 characters. There is no default token and none is generated.
+
+```bash
+export FCAPZ_MCP_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+fcapz-mcp --transport http                       # http://127.0.0.1:8765/mcp
+fcapz-mcp --transport http --http-host 0.0.0.0 \
+          --http-tls-cert cert.pem --http-tls-key key.pem   # https, reachable on the LAN
+```
+
+| Flag | Effect |
+| --- | --- |
+| `--transport http` | Serve streamable HTTP at `/mcp` instead of stdio. |
+| `--http-host ADDR` | Listen address, default `127.0.0.1`. A non-loopback address needs TLS or `--http-insecure`. (Unrelated to `--allow-host`, which names backend daemons.) |
+| `--http-port PORT` | Listen port, default `8765`. |
+| `--http-token-file FILE` | Read the bearer token from `FILE` instead of `FCAPZ_MCP_TOKEN`. |
+| `--http-tls-cert PEM` / `--http-tls-key PEM` | Serve HTTPS. Both or neither. |
+| `--http-insecure` | Permit plain HTTP on a non-loopback address; the token then crosses the network in clear text. Prefer TLS or an SSH tunnel (`ssh -L 8765:127.0.0.1:8765 bench`) to a loopback-bound server. |
+
+On a loopback bind the MCP SDK also checks the `Host` header against
+`127.0.0.1`/`localhost`/`[::1]`, which stops a web page from reaching the
+server through DNS rebinding. A network bind drops that check — the `Host` is
+whatever name the clients use — and relies on the token, which a browser page
+cannot attach. The `--allow-*` safety flags apply exactly as they do on stdio:
+the token decides who may call, the flags decide what a call may do.
 
 If close operations fail during shutdown, the server writes one compact JSON
 line to stderr:
@@ -78,6 +115,15 @@ Example stdio client configuration:
 
 Use `--read-only` for diagnostic sessions where the agent should not arm
 captures or drive target-side state. Probe/read/status tools remain available.
+
+For Claude Code, the same server is registered with `claude mcp add`; over
+HTTP the token travels as a header:
+
+```bash
+claude mcp add fpgacapzero -- fcapz-mcp --read-only
+claude mcp add --transport http fpgacapzero https://bench.example:8765/mcp \
+    --header "Authorization: Bearer $FCAPZ_MCP_TOKEN"
+```
 
 MCP tool calls are JSON objects containing a tool `name` and `arguments`.
 For example:
