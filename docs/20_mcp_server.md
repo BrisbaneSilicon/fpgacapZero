@@ -231,7 +231,8 @@ same still-running worker guard applies.
 | `fcapz_capture_wait` | capture* (readout); always (`status_only`) | Read out an already-armed capture (from `fcapz_configure` + `fcapz_arm`) without reconfiguring or re-arming. Returns `{triggered: false, still_armed: true}` (not an error) if the trigger has not fired yet. `status_only=true` reads the capture FSM state without waiting or transferring samples. |
 | `fcapz_disarm` | capture* | Soft-reset the capture FSM to idle, discarding any in-flight arm. |
 | `fcapz_get_last_capture` | always available | Return the cached full capture payload for clients without resource support. Defaults to a 1 MiB guard, capped at 8 MiB. |
-| `fcapz_get_capture_samples` | always available | Page the cached capture's samples as whole records, with named fields from the probe map. See [Reading a Capture](#reading-a-capture). |
+| `fcapz_get_capture_samples` | always available | Page the cached capture's samples as whole records, with named fields from the probe map; `around_trigger=N` reads the window around the trigger. See [Reading a Capture](#reading-a-capture). |
+| `fcapz_find_in_capture` | always available | Search the cached capture for edges, rising/falling bits, value matches or runs of one signal, paged, with first/last positions. See [Searching a Capture](#searching-a-capture). |
 | `fcapz_axi_transactions` | always available | Decoded AXI4-Lite transactions of the cached capture — paged, filterable by anomaly or read/write. See [AXI Transactions](#axi-transactions). |
 | `fcapz_get_last_capture_chunk` | always available | Return a bounded JSON text chunk of the cached capture payload. |
 | `fcapz_drop_last_capture` | always available | Drop the cached full capture payload and report whether one existed. |
@@ -242,7 +243,7 @@ same still-running worker guard applies.
 out of the tool list entirely, rather than offered and then refused: the agent
 would otherwise plan around it, spend a call discovering the refusal, and pay
 for its schema in every request. So the advertised surface tracks the flags —
-15 tools under `--read-only`, 19 by default, 22 with every write enabled. The
+16 tools under `--read-only`, 20 by default, 23 with every write enabled. The
 session-level permission checks remain as the actual enforcement; the gating
 is about what the agent is told exists.
 
@@ -282,8 +283,9 @@ an integer, because a value wider than 53 bits cannot survive a JSON number.
 The session still validates everything it is given — the schema is the
 client's contract, not the server's guarantee.
 
-Four tools declare an `outputSchema` as well: `fcapz_get_capture_samples`,
-`fcapz_axi_transactions`, `fcapz_get_last_capture_chunk`, and `fcapz_status`.
+Five tools declare an `outputSchema` as well: `fcapz_get_capture_samples`,
+`fcapz_find_in_capture`, `fcapz_axi_transactions`,
+`fcapz_get_last_capture_chunk`, and `fcapz_status`.
 Those are the payloads this server builds end to end, and each returns one
 fixed shape — every field is always present, `null` where it does not apply,
 so a caller never has to branch on which keys exist. Everything else is an
@@ -375,7 +377,9 @@ locally.
 
 Large captures stay in memory until the next capture, `fcapz_close`, or
 `fcapz_drop_last_capture`. There are three ways to read one, in order of
-preference:
+preference — and when you are looking for something specific, search first
+with `fcapz_find_in_capture` ([below](#searching-a-capture)) and read only
+around the hits:
 
 1. **`fcapz_axi_transactions`** — for an AXI monitor capture. Transactions
    beat cycles for bus debugging; see [AXI Transactions](#axi-transactions).
@@ -385,7 +389,11 @@ preference:
    its own. Page with `next_start` until it is `null` (`count` caps at 512).
    `fields` narrows the signals returned; `fields=[]` gives the packed value
    instead. `radix` is `"hex"` (default) or `"int"`, and values too wide for
-   an exact JSON number stay hex either way.
+   an exact JSON number stay hex either way. `around_trigger=N` returns
+   the `N` samples either side of the trigger instead of `start`/`count`; when
+   the trigger cannot be located (a segmented capture, or one shorter than
+   `pretrigger + posttrigger + 1`) the page comes back empty with a `reason`
+   rather than a guess.
 3. **`fcapz_get_last_capture_chunk`** — raw bytes of the whole payload. Use
    it to export a capture verbatim, or for `csv`/`vcd` captures. It is a
    transfer mechanism, not a reading one: chunks are not independently
@@ -423,6 +431,42 @@ entire payload, and does it from a string that is already built, so it
 measures 0 ms of loop stall for the same 24 MB the tool needed 125 ms for.
 Prefer the resource for a whole payload, and the chunk tool where the client
 has no resource support.
+
+## Searching a Capture
+
+`fcapz_find_in_capture` answers "where does X happen" without paging the
+capture into context. It scans one signal — a probe-map `field`, or the packed
+sample when `field` is omitted — and returns the matches, paged:
+
+| `op` | Finds | Entry fields |
+| --- | --- | --- |
+| `edges` | Every change of the (masked) signal; with `value`, only changes *to* it. | `from`, `to` |
+| `rising` / `falling` | A 0→1 / 1→0 of bit `bit` (default 0) of the signal. | — |
+| `match` | Every sample where `signal & mask == value & mask`. | `value` |
+| `bursts` | Maximal runs of one value, at least `min_length` long; with `value`, only runs of it. | `length`, `value` |
+
+`mask` defaults to the whole signal. `value` and `mask` accept a base-prefixed
+string for signals wider than 53 bits, and one with bits the signal does not
+have is rejected rather than silently never matching.
+
+Every entry carries `position`, the flattened index that
+`fcapz_get_capture_samples(start=position)` takes, so a hit can be read in
+context with one more call; the sample's own `index`; `segment` on a
+segmented capture; and `trigger_offset` (samples after the trigger, negative
+before it) when the trigger can be located. A segmented capture is searched
+segment by segment, so the jump between two segments is never reported as an
+edge.
+
+`total`, `first_position` and `last_position` cover every match, not just the
+page, so "the first sample where `state == 3`" is
+`fcapz_find_in_capture(op="match", field="state", value=3, count=1)` and needs
+no paging. Page with `next_start` until it is `null`; `count` is capped at 512.
+
+```text
+fcapz_find_in_capture(op="rising", field="valid")          # every handshake start
+fcapz_find_in_capture(op="bursts", field="busy", value=1, min_length=100)
+fcapz_get_capture_samples(start=<position>, count=16)      # read one in context
+```
 
 ## AXI Transactions
 

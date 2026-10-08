@@ -9,6 +9,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **MCP — search a capture instead of paging it.** `fcapz_find_in_capture`
+  finds the edges of a named field, rising/falling edges of a bit, every
+  sample matching a value under a mask, or runs of one value (optionally at
+  least `min_length` long), and returns them paged with `total`,
+  `first_position` and `last_position` — so "the first sample where X == v" is
+  one call. Each hit carries the position `fcapz_get_capture_samples` takes,
+  and its offset from the trigger. Segmented captures are searched per
+  segment, and wide values stay exact. `fcapz_get_capture_samples` also gains
+  `around_trigger=N` for the window either side of the trigger.
+
 - **Segmented captures are reachable from MCP.** `fcapz_capture` and
   `fcapz_capture_wait` take `segments=true` to read back every segment
   instead of segment 0; sample paging concatenates them, tags each sample
@@ -422,7 +432,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **The MCP tool list now tracks the safety flags.** A tool whose capability
   is disabled is no longer advertised and then refused — it is left out of the
   list, so an agent neither plans around it nor pays for its schema in every
-  request (15 tools under `--read-only`, 19 by default, 22 with all writes
+  request (16 tools under `--read-only`, 20 by default, 23 with all writes
   enabled). The session-level permission checks are unchanged and remain the
   enforcement.
 

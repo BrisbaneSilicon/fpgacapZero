@@ -82,6 +82,7 @@ CloseTarget = Literal["all", "eio", "axi", "uart"]
 CaptureFormat = Literal["json", "csv", "vcd"]
 SampleRadix = Literal["hex", "int"]
 TransactionKind = Literal["read", "write"]
+FindOp = Literal["edges", "rising", "falling", "match", "bursts"]
 TriggerMode = Literal["value_match", "edge_detect", "both"]
 ExtTriggerMode = Literal[0, 1, 2]  # 0=disabled, 1=OR, 2=AND
 
@@ -155,6 +156,28 @@ class AxiTransactionPage(TypedDict):
     # handshakes). Null when no decode is cached.
     sampling: dict[str, Any] | None
     transactions: list[dict[str, Any]]
+
+
+class CaptureMatches(TypedDict):
+    """One page of `fcapz_find_in_capture`."""
+
+    available: bool
+    reason: str | None
+    op: FindOp
+    field: str | None
+    radix: SampleRadix
+    # Over every match, not just this page: "first/last sample where ..." is
+    # answered without paging at all.
+    total: int
+    first_position: int | None
+    last_position: int | None
+    start: int
+    count: int
+    next_start: int | None
+    trigger_index: int | None
+    # Entry keys depend on `op` (an edge has from/to, a burst a length), so
+    # the records stay open like sample records do.
+    matches: list[dict[str, Any]]
 
 
 class CaptureChunk(TypedDict):
@@ -1623,11 +1646,14 @@ class FcapzMcpSession:
         count: int = 128,
         fields: list[str] | None = None,
         radix: SampleRadix = "hex",
+        around_trigger: int | None = None,
     ) -> SamplePage:
         """Page the cached capture's samples as whole, self-contained records.
 
         Unlike the byte-chunked payload, each page is valid JSON on its own
         and carries the context needed to read it (total, trigger_index).
+        `around_trigger=N` replaces start/count with the N samples either
+        side of the trigger, when the capture's layout locates it.
         """
         if radix not in ("hex", "int"):
             raise ValueError(f"radix must be 'hex' or 'int'; got {radix!r}")
@@ -1646,10 +1672,30 @@ class FcapzMcpSession:
             raise ValueError("start must be >= 0")
         if count_i <= 0:
             raise ValueError("count must be > 0")
+        multi = len(results) > 1
+        if around_trigger is not None:
+            span = int(around_trigger)
+            if span < 0:
+                raise ValueError("around_trigger must be >= 0")
+            if start_i != 0:
+                raise ValueError("pass either start or around_trigger, not both")
+            trigger = None if multi else self._trigger_index(
+                results[0], len(results[0]["samples"])
+            )
+            if trigger is None:
+                # Guessing from pretrigger would point at the wrong sample in
+                # exactly the captures where it matters (see _trigger_index).
+                return self._empty_sample_page(
+                    radix,
+                    "the trigger sample cannot be located in this capture "
+                    "(segmented, or shorter than pretrigger+posttrigger+1); "
+                    "page with start/count instead",
+                )
+            start_i = max(0, trigger - span)
+            count_i = trigger + span + 1 - start_i
         count_i = min(count_i, self._SAMPLES_MAX_PAGE)
 
         probes = self._selected_probes(cache.payload, fields)
-        multi = len(results) > 1
         entries: list[tuple[int | None, Any]] = []
         for position, result in enumerate(results):
             segment = result.get("segment", position) if multi else None
@@ -1684,6 +1730,218 @@ class FcapzMcpSession:
             "fields": [name for name, _, _ in probes] if probes is not None else None,
         }
         return out
+
+    _FIND_MAX_PAGE = 512
+
+    def find_in_capture(
+        self,
+        *,
+        op: FindOp,
+        field: str | None = None,
+        value: int | str | None = None,
+        mask: int | str | None = None,
+        bit: int = 0,
+        min_length: int = 1,
+        start: int = 0,
+        count: int = 64,
+        radix: SampleRadix = "hex",
+    ) -> CaptureMatches:
+        """Search the cached capture instead of paging through it.
+
+        Scans one signal (a probe-map field, or the packed sample) segment by
+        segment, so nothing is reported across a segment boundary, and pages
+        the matches. `position` in each match is the flattened index that
+        fcapz_get_capture_samples(start=...) takes, so a hit can be read in
+        context with one more call.
+        """
+        if op not in ("edges", "rising", "falling", "match", "bursts"):
+            raise ValueError(
+                f"op must be one of edges, rising, falling, match, bursts; got {op!r}"
+            )
+        if radix not in ("hex", "int"):
+            raise ValueError(f"radix must be 'hex' or 'int'; got {radix!r}")
+        start_i, count_i = int(start), int(count)
+        if start_i < 0:
+            raise ValueError("start must be >= 0")
+        if count_i <= 0:
+            raise ValueError("count must be > 0")
+        count_i = min(count_i, self._FIND_MAX_PAGE)
+        min_len = int(min_length)
+        if min_len < 1:
+            raise ValueError("min_length must be >= 1")
+        bit_i = int(bit)
+        if op in ("rising", "falling"):
+            if value is not None or mask is not None:
+                raise ValueError(f"op={op!r} takes bit, not value/mask")
+        elif bit_i != 0:
+            raise ValueError("bit applies to op='rising'/'falling' only")
+        if min_len != 1 and op != "bursts":
+            raise ValueError("min_length applies to op='bursts' only")
+        if op == "match" and value is None:
+            raise ValueError("op='match' needs a value")
+        value_i = self._bits_arg(value, "value") if value is not None else None
+        mask_arg = self._bits_arg(mask, "mask") if mask is not None else None
+
+        cache = self._capture_cache  # one consistent snapshot for this call
+        if cache is None:
+            return self._empty_matches(op, field, radix, None)
+        results = self._capture_results(cache.payload)
+        if not results:
+            return self._empty_matches(
+                op, field, radix,
+                "the cached capture has no JSON sample list; capture with "
+                'format="json" to search samples',
+            )
+
+        lsb, width = self._signal_slice(cache.payload, results[0], field)
+        full = (1 << width) - 1 if width else None
+        if full is not None:
+            # A value with bits the signal does not have can never match; say
+            # so rather than report zero hits for what is a wrong argument.
+            for name, arg in (("value", value_i), ("mask", mask_arg)):
+                if arg is not None and arg & ~full:
+                    raise ValueError(
+                        f"{name} {_hex_int(arg)} is wider than the "
+                        f"{width}-bit signal {field or 'sample'!r}"
+                    )
+        mask_i = mask_arg if mask_arg is not None else full
+        if op in ("rising", "falling") and (
+            bit_i < 0 or (width is not None and bit_i >= width)
+        ):
+            limit = f"0..{width - 1}" if width is not None else ">= 0"
+            raise ValueError(f"bit must be in {limit} for this signal, got {bit_i}")
+
+        def masked(v: int) -> int:
+            return v if mask_i is None else v & mask_i
+
+        multi = len(results) > 1
+        trigger = None if multi else self._trigger_index(
+            results[0], len(results[0]["samples"])
+        )
+        found: list[JsonDict] = []
+        base = 0  # flattened position of the segment's first sample
+        for seg_pos, result in enumerate(results):
+            entries = result["samples"]
+            seg = result.get("segment", seg_pos) if multi else None
+            values = []
+            for entry in entries:
+                raw = self._as_int(entry.get("value")) if isinstance(entry, dict) else None
+                if raw is None:
+                    raise ValueError("the cached capture has a non-integer sample value")
+                raw >>= lsb
+                values.append(raw & full if full is not None else raw)
+
+            def hit(i: int, extra: JsonDict) -> None:
+                entry = entries[i]
+                rec: JsonDict = {"position": base + i, "index": entry.get("index", i)}
+                if seg is not None:
+                    rec["segment"] = seg
+                if trigger is not None:
+                    rec["trigger_offset"] = base + i - trigger
+                rec.update(extra)
+                found.append(rec)
+
+            if op == "match":
+                want = masked(value_i)  # type: ignore[arg-type]
+                for i, v in enumerate(values):
+                    if masked(v) == want:
+                        hit(i, {"value": self._fmt(v, radix)})
+            elif op == "edges":
+                want_to = None if value_i is None else masked(value_i)
+                for i in range(1, len(values)):
+                    old, new = masked(values[i - 1]), masked(values[i])
+                    if old != new and (want_to is None or new == want_to):
+                        hit(i, {"from": self._fmt(old, radix), "to": self._fmt(new, radix)})
+            elif op in ("rising", "falling"):
+                want_new = 1 if op == "rising" else 0
+                for i in range(1, len(values)):
+                    old = (values[i - 1] >> bit_i) & 1
+                    new = (values[i] >> bit_i) & 1
+                    if old != new and new == want_new:
+                        hit(i, {})
+            else:  # bursts: maximal runs of one (masked) value
+                want_run = None if value_i is None else masked(value_i)
+                run_start = 0
+                for i in range(1, len(values) + 1):
+                    if i < len(values) and masked(values[i]) == masked(values[run_start]):
+                        continue
+                    run_value = masked(values[run_start])
+                    length = i - run_start
+                    if length >= min_len and (want_run is None or run_value == want_run):
+                        hit(run_start, {"length": length, "value": self._fmt(run_value, radix)})
+                    run_start = i
+            base += len(values)
+
+        page = found[start_i : start_i + count_i]
+        next_start = start_i + len(page)
+        return {
+            "available": True,
+            "reason": None,
+            "op": op,
+            "field": field,
+            "radix": radix,
+            "total": len(found),
+            "first_position": found[0]["position"] if found else None,
+            "last_position": found[-1]["position"] if found else None,
+            "start": start_i,
+            "count": len(page),
+            "next_start": next_start if next_start < len(found) else None,
+            "trigger_index": trigger,
+            "matches": page,
+        }
+
+    def _signal_slice(
+        self, payload: JsonDict, first: JsonDict, field: str | None
+    ) -> tuple[int, int | None]:
+        """(lsb, width) of the searched signal; width None when unknown."""
+        if field is not None:
+            selected = self._selected_probes(payload, [field]) or []
+            _, lsb, width = selected[0]
+            return lsb, width
+        width = first.get("sample_width")
+        if isinstance(width, int) and not isinstance(width, bool) and width > 0:
+            return 0, width
+        return 0, None
+
+    @staticmethod
+    def _bits_arg(value: int | str, name: str) -> int:
+        """A compare value or mask: an int, or a base-prefixed string when wide."""
+        if isinstance(value, bool):
+            raise ValueError(f"{name} must be an integer, got {value!r}")
+        if isinstance(value, str):
+            try:
+                out = int(value, 0)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{name} must be an integer or a base-prefixed string "
+                    f"(e.g. \"0x1f\"), got {value!r}"
+                ) from exc
+        else:
+            out = int(value)
+        if out < 0:
+            raise ValueError(f"{name} must be >= 0, got {value!r}")
+        return out
+
+    @staticmethod
+    def _empty_matches(
+        op: FindOp, field: str | None, radix: SampleRadix, reason: str | None
+    ) -> CaptureMatches:
+        """No matches to give, in the same shape as a page that has some."""
+        return {
+            "available": False,
+            "reason": reason,
+            "op": op,
+            "field": field,
+            "radix": radix,
+            "total": 0,
+            "first_position": None,
+            "last_position": None,
+            "start": 0,
+            "count": 0,
+            "next_start": None,
+            "trigger_index": None,
+            "matches": [],
+        }
 
     @staticmethod
     def _empty_sample_page(radix: SampleRadix, reason: str | None) -> SamplePage:
@@ -2966,6 +3224,7 @@ def build_mcp_server(session: FcapzMcpSession):
         count: int = 128,
         fields: list[str] | None = None,
         radix: SampleRadix = "hex",
+        around_trigger: int | None = None,
     ) -> SamplePage:
         """Page the cached capture's samples as whole records.
 
@@ -2980,12 +3239,66 @@ def build_mcp_server(session: FcapzMcpSession):
         get the packed `value` instead. `radix` is "hex" (default) or "int" —
         values too wide for an exact JSON number are always hex regardless.
         Page with the returned `next_start` until it is null; `count` is
-        capped at 512. For an AXI monitor capture, prefer
-        fcapz_axi_transactions — transactions beat cycles for bus debugging.
+        capped at 512. `around_trigger=N` returns the N samples either side
+        of the trigger instead of start/count (an empty page with a `reason`
+        when the trigger cannot be located). To find something rather than
+        read everything, use fcapz_find_in_capture. For an AXI monitor
+        capture, prefer fcapz_axi_transactions — transactions beat cycles for
+        bus debugging.
         """
 
         return session.capture_samples(
-            start=start, count=count, fields=fields, radix=radix
+            start=start,
+            count=count,
+            fields=fields,
+            radix=radix,
+            around_trigger=around_trigger,
+        )
+
+    @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=True)
+    def fcapz_find_in_capture(
+        op: FindOp,
+        field: str | None = None,
+        value: int | str | None = None,
+        mask: int | str | None = None,
+        bit: int = 0,
+        min_length: int = 1,
+        start: int = 0,
+        count: int = 64,
+        radix: SampleRadix = "hex",
+    ) -> CaptureMatches:
+        """Search the cached capture for edges, values or runs of one signal.
+
+        `field` names a probe-map signal (omit it to search the packed
+        sample). `op`:
+        - "edges": every change; entries carry `from`/`to`. With `value`,
+          only changes *to* that value.
+        - "rising" / "falling": 0->1 / 1->0 of bit `bit` (default 0).
+        - "match": every sample where (signal & mask) == (value & mask);
+          entries carry `value`.
+        - "bursts": maximal runs of one value, at least `min_length` long
+          (optionally only runs of `value`); entries carry `length`/`value`.
+        `mask` (default: the whole signal) applies to edges, match and bursts.
+        value/mask accept a hex string for signals wider than 53 bits.
+
+        Every entry has `position` — pass it to fcapz_get_capture_samples
+        (start=position) to read the hit in context — plus the sample's own
+        `index`, `segment` on a segmented capture, and `trigger_offset` when
+        the trigger is located. `total`, `first_position` and `last_position`
+        cover every match, so "first/last sample where X == v" needs no
+        paging. Page with `next_start`; `count` is capped at 512.
+        """
+
+        return session.find_in_capture(
+            op=op,
+            field=field,
+            value=value,
+            mask=mask,
+            bit=bit,
+            min_length=min_length,
+            start=start,
+            count=count,
+            radix=radix,
         )
 
     @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=True)

@@ -1176,6 +1176,7 @@ class FcapzMcpSessionTests(unittest.TestCase):
                 "fcapz_axi_write",
                 "fcapz_axi_transactions",
                 "fcapz_get_capture_samples",
+                "fcapz_find_in_capture",
                 "fcapz_uart_send",
                 "fcapz_uart_recv",
                 "fcapz_uart_status",
@@ -1699,6 +1700,8 @@ class OutputSchemaTests(unittest.TestCase):
             ("fcapz_get_capture_samples", {"count": 2, "fields": ["awaddr"]}),
             ("fcapz_axi_transactions", {}),
             ("fcapz_get_last_capture_chunk", {"max_bytes": 40}),
+            ("fcapz_find_in_capture", {"op": "edges", "field": "awaddr"}),
+            ("fcapz_find_in_capture", {"op": "bursts"}),
             ("fcapz_status", {}),
         ]
         for name, args in calls:
@@ -1712,13 +1715,14 @@ class OutputSchemaTests(unittest.TestCase):
 
         # Nothing cached: these return {"available": false} alone.
         app = build_mcp_server(FcapzMcpSession(rpc=FakeRpc()))
-        for name in (
-            "fcapz_get_capture_samples",
-            "fcapz_axi_transactions",
-            "fcapz_get_last_capture_chunk",
+        for name, args in (
+            ("fcapz_get_capture_samples", {}),
+            ("fcapz_axi_transactions", {}),
+            ("fcapz_get_last_capture_chunk", {}),
+            ("fcapz_find_in_capture", {"op": "edges"}),
         ):
             with self.subTest(tool=name):
-                content, structured = asyncio.run(app.call_tool(name, {}))
+                content, structured = asyncio.run(app.call_tool(name, args))
                 self.assertEqual(json.loads(content[0].text), structured)
                 self.assertIs(structured["available"], False)
 
@@ -1735,6 +1739,7 @@ class OutputSchemaTests(unittest.TestCase):
             "fcapz_get_capture_samples",
             "fcapz_axi_transactions",
             "fcapz_get_last_capture_chunk",
+            "fcapz_find_in_capture",
             "fcapz_status",
         }
         for name, tool in tools.items():
@@ -3039,6 +3044,152 @@ class ConsolidatedToolTests(unittest.TestCase):
         with self.assertRaises(Exception) as caught:
             asyncio.run(app.call_tool("fcapz_capture_wait", {}))
         self.assertEqual(json.loads(str(caught.exception))["code"], "not_permitted")
+
+
+
+class FindInCaptureTests(unittest.TestCase):
+    """Search a capture instead of paging it into context."""
+
+    # strobe is bit 0, data bits 4..11; pretrigger 3 puts the trigger at 3.
+    SAMPLES = [0x000, 0x011, 0x011, 0x0A1, 0x0A0, 0x0A0, 0x0A0, 0x0B1]
+
+    def _session(self, samples=None, *, probes=True, pre=3, post=4):
+        samples = self.SAMPLES if samples is None else samples
+        session = FcapzMcpSession(rpc=FakeRpc())
+        payload = {
+            "ok": True,
+            "format": "json",
+            "result": {
+                "sample_width": 12,
+                "pretrigger": pre,
+                "posttrigger": post,
+                "samples": [{"index": i, "value": v} for i, v in enumerate(samples)],
+            },
+        }
+        if probes:
+            payload["probes"] = [
+                {"name": "strobe", "width": 1, "lsb": 0},
+                {"name": "data", "width": 8, "lsb": 4},
+            ]
+        session._store_capture(payload)
+        return session
+
+    def test_edges_of_a_field_report_from_to_and_trigger_offset(self):
+        found = self._session().find_in_capture(op="edges", field="data", radix="int")
+        self.assertEqual(
+            [(m["position"], m["from"], m["to"]) for m in found["matches"]],
+            [(1, 0, 1), (3, 1, 0x0A), (7, 0x0A, 0x0B)],
+        )
+        self.assertEqual(found["trigger_index"], 3)
+        self.assertEqual([m["trigger_offset"] for m in found["matches"]], [-2, 0, 4])
+        self.assertEqual((found["first_position"], found["last_position"]), (1, 7))
+
+    def test_edges_to_a_value(self):
+        found = self._session().find_in_capture(op="edges", field="data", value="0x0a")
+        self.assertEqual([m["position"] for m in found["matches"]], [3])
+
+    def test_rising_and_falling_edges_of_a_bit(self):
+        session = self._session()
+        rising = session.find_in_capture(op="rising", field="strobe")
+        falling = session.find_in_capture(op="falling", field="strobe")
+        self.assertEqual([m["position"] for m in rising["matches"]], [1, 7])
+        self.assertEqual([m["position"] for m in falling["matches"]], [4])
+        # bit 1 of `data` is set from position 3 (0x0A) on, and not before.
+        data_bit1 = session.find_in_capture(op="rising", field="data", bit=1)
+        self.assertEqual([m["position"] for m in data_bit1["matches"]], [3])
+
+    def test_first_and_last_match_without_paging(self):
+        found = self._session().find_in_capture(
+            op="match", field="data", value=0x0A, count=1
+        )
+        self.assertEqual(found["total"], 4)
+        self.assertEqual(len(found["matches"]), 1)
+        self.assertEqual((found["first_position"], found["last_position"]), (3, 6))
+        self.assertEqual(found["next_start"], 1)
+
+    def test_match_with_a_mask_on_the_packed_sample(self):
+        found = self._session(probes=False).find_in_capture(
+            op="match", value=0x001, mask=0x00F
+        )
+        self.assertEqual([m["position"] for m in found["matches"]], [1, 2, 3, 7])
+        self.assertEqual(found["matches"][2]["value"], "0xa1")
+
+    def test_bursts_with_value_and_min_length(self):
+        session = self._session()
+        runs = session.find_in_capture(op="bursts", field="data", radix="int")
+        self.assertEqual(
+            [(m["position"], m["length"], m["value"]) for m in runs["matches"]],
+            [(0, 1, 0), (1, 2, 1), (3, 4, 0x0A), (7, 1, 0x0B)],
+        )
+        long_runs = session.find_in_capture(op="bursts", field="data", min_length=2)
+        self.assertEqual([m["position"] for m in long_runs["matches"]], [1, 3])
+        ones = session.find_in_capture(op="bursts", field="data", value=1)
+        self.assertEqual([m["position"] for m in ones["matches"]], [1])
+
+    def test_segments_are_searched_separately(self):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        session._store_capture(SegmentedCaptureTests._payload())
+        # Segment 0 ends at 0x02 and segment 1 starts at 0x10: not an edge.
+        found = session.find_in_capture(op="edges", field="addr")
+        self.assertEqual(
+            [(m["position"], m["segment"], m["index"]) for m in found["matches"]],
+            [(1, 0, 1), (2, 0, 2), (4, 1, 1), (5, 1, 2)],
+        )
+        self.assertIsNone(found["trigger_index"])
+        self.assertNotIn("trigger_offset", found["matches"][0])
+
+    def test_wide_values_are_searched_exactly(self):
+        wide = (1 << 100) | 0x5
+        session = FcapzMcpSession(rpc=FakeRpc())
+        session._store_capture({
+            "ok": True,
+            "result": {
+                "sample_width": 128,
+                "samples": [{"index": 0, "value": 0x5}, {"index": 1, "value": wide}],
+            },
+        })
+        found = session.find_in_capture(op="match", value=hex(wide), radix="int")
+        self.assertEqual([m["position"] for m in found["matches"]], [1])
+        # Too wide for a JSON number, so hex even though int was asked for.
+        self.assertEqual(found["matches"][0]["value"], hex(wide))
+
+    def test_bad_arguments_are_named(self):
+        session = self._session()
+        cases = [
+            ({"op": "match", "field": "data"}, "needs a value"),
+            ({"op": "edges", "field": "nope"}, "unknown field"),
+            ({"op": "rising", "field": "strobe", "bit": 1}, "bit must be in 0..0"),
+            ({"op": "rising", "field": "strobe", "value": 1}, "takes bit"),
+            ({"op": "edges", "bit": 2}, "bit applies"),
+            ({"op": "match", "min_length": 2, "value": 1}, "min_length applies"),
+            ({"op": "match", "field": "data", "value": 0x100}, "wider than"),
+            ({"op": "match", "value": "zz"}, "base-prefixed"),
+            ({"op": "teleport"}, "op must be"),
+        ]
+        for kwargs, message in cases:
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaisesRegex(ValueError, message):
+                    session.find_in_capture(**kwargs)
+
+    def test_nothing_cached_is_an_empty_page_not_an_error(self):
+        found = FcapzMcpSession(rpc=FakeRpc()).find_in_capture(op="edges")
+        self.assertIs(found["available"], False)
+        self.assertEqual(found["matches"], [])
+
+    def test_samples_around_the_trigger(self):
+        page = self._session().capture_samples(around_trigger=1, fields=["data"])
+        self.assertEqual([s["index"] for s in page["samples"]], [2, 3, 4])
+        clipped = self._session().capture_samples(around_trigger=5)
+        self.assertEqual(clipped["start"], 0)
+        self.assertEqual(clipped["count"], 8)
+
+    def test_around_the_trigger_refuses_to_guess(self):
+        # Short capture: pretrigger no longer locates the trigger.
+        page = self._session(pre=3, post=40).capture_samples(around_trigger=2)
+        self.assertIs(page["available"], False)
+        self.assertIn("cannot be located", page["reason"])
+        with self.assertRaisesRegex(ValueError, "not both"):
+            self._session().capture_samples(start=1, around_trigger=2)
 
 
 if __name__ == "__main__":
