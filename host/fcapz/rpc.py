@@ -637,6 +637,20 @@ class RpcServer:
             raise ValueError(f"trigger_delay must be 0..65535, got {delay}")
         return delay
 
+    def _config_for(self, analyzer: Analyzer, req: Dict[str, Any]) -> CaptureConfig:
+        """Build the request's config, reading omitted geometry from the core.
+
+        ``depth`` and ``sample_width`` must equal the synthesized core's, so a
+        fixed default is wrong for every core built another size (an AXI
+        monitor is often 256 deep). The CLI and GUI read them from the core
+        too. Probes only when one is missing; explicit values still win and
+        still fail loudly on a mismatch.
+        """
+        hw = None
+        if req.get("depth") is None or req.get("sample_width") is None:
+            hw = analyzer.probe()
+        return self._build_config(req, hw)
+
     @staticmethod
     def _validated_trigger_holdoff(delay: int) -> int:
         if not (0 <= delay <= 0xFFFF):
@@ -661,7 +675,10 @@ class RpcServer:
         raise ValueError(f"{field} must be a boolean, got {value!r}")
 
     @classmethod
-    def _build_config(cls, req: Dict[str, Any]) -> CaptureConfig:
+    def _build_config(
+        cls, req: Dict[str, Any], hw: Dict[str, Any] | None = None
+    ) -> CaptureConfig:
+        """Build a CaptureConfig; ``hw`` (a probe dict) supplies omitted geometry."""
         probe_file = load_probe_file(req["probe_file"]) if req.get("probe_file") else None
         if probe_file is not None and req.get("probes") is not None:
             raise ValueError("probes and probe_file are mutually exclusive")
@@ -673,7 +690,7 @@ class RpcServer:
         file_sample_width = (
             probe_file.sample_width
             if probe_file is not None and probe_file.sample_width is not None
-            else 8
+            else int((hw or {}).get("sample_width", 8))
         )
         file_sample_clock_hz = (
             probe_file.sample_clock_hz
@@ -691,8 +708,16 @@ class RpcServer:
                 value=cls._parse_int(req.get("trigger_value", 0)),
                 mask=cls._parse_int(req.get("trigger_mask", 0xFF)),
             ),
-            sample_width=int(req.get("sample_width", file_sample_width)),
-            depth=int(req.get("depth", 1024)),
+            sample_width=int(
+                file_sample_width
+                if req.get("sample_width") is None
+                else req["sample_width"]
+            ),
+            depth=int(
+                (hw or {}).get("depth", 1024)
+                if req.get("depth") is None
+                else req["depth"]
+            ),
             sample_clock_hz=int(req.get("sample_clock_hz", file_sample_clock_hz)),
             probes=probes,
             channel=int(req.get("channel", 0)),
@@ -969,7 +994,7 @@ class RpcServer:
             return self._ok(present=True, chain=chain, **info)
 
         if cmd == "configure":
-            analyzer.configure(self._build_config(req))
+            analyzer.configure(self._config_for(analyzer, req))
             return self._ok()
 
         if cmd == "arm":
@@ -983,7 +1008,7 @@ class RpcServer:
             return self._ok()
 
         if cmd == "capture":
-            cfg = self._build_config(req)
+            cfg = self._config_for(analyzer, req)
             # "Trigger Immediate": rewrite the config to an always-true trigger
             # so the capture fires now instead of waiting (matches the GUI).
             if req.get("immediate"):

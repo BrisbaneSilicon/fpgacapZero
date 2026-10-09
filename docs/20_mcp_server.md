@@ -367,8 +367,8 @@ Valid `config` keys for `fcapz_capture` and `fcapz_configure` are:
 | `trigger_mode` | Trigger comparator/mode selection. |
 | `trigger_value` | Trigger compare value. |
 | `trigger_mask` | Trigger compare mask. |
-| `sample_width` | Expected sample width in bits. |
-| `depth` | Capture depth in samples. |
+| `sample_width` | Expected sample width in bits. Omit it to use the probe file's, else the core's. |
+| `depth` | Capture depth in samples. Omit it to use the core's. |
 | `sample_clock_hz` | Optional sample clock rate for timestamp/event reporting. |
 | `probes` | Probe definitions, matching the RPC/Python probe schema. |
 | `probe_file` | Name of a probe definition file directly inside `--probe-root`. |

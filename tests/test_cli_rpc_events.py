@@ -832,6 +832,20 @@ class RpcTests(unittest.TestCase):
         self.assertEqual(vcd_resp["format"], "vcd")
         self.assertIn("$enddefinitions $end", vcd_resp["content"])
 
+    def test_omitted_geometry_is_read_from_the_core(self):
+        """A 256-deep, 16-bit core needs no depth/sample_width from the client."""
+        server = RpcServerHarness(FakeTransport(sample_w=16, depth=256))
+        server.handle({"cmd": "connect"})
+        server.handle({"cmd": "configure", "pretrigger": 2, "posttrigger": 5})
+        cfg = server._analyzer._config  # noqa: SLF001
+        self.assertEqual((cfg.depth, cfg.sample_width), (256, 16))
+
+    def test_explicit_geometry_still_wins_and_fails_loudly(self):
+        server = RpcServerHarness(FakeTransport(depth=256))
+        server.handle({"cmd": "connect"})
+        with self.assertRaisesRegex(ValueError, "depth mismatch: config=1024, hw=256"):
+            server.handle({"cmd": "configure", "depth": 1024})
+
 
 class ChainShapeKwargsTests(unittest.TestCase):
     """CLI auto-detection of XilinxHwServerTransport kwargs from fpga_name."""

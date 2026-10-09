@@ -415,6 +415,10 @@ fields optional except `pretrigger`, `posttrigger`, `trigger_value`.
 }
 ```
 
+`depth` and `sample_width` must match the synthesized core; omit them to
+read them from the connected core (a `probe_file`'s `sample_width` takes
+precedence). An explicit value that disagrees is rejected.
+
 `probes` can also be a string in the CLI `name:width:lsb,...` form.
 Use `probe_file` with a `.prob` sidecar path to load the same information
 from disk; `probes` and `probe_file` are mutually exclusive.

@@ -288,6 +288,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **RPC — `configure`/`capture` no longer assume a 1024-deep core.** An
+  omitted `depth` defaulted to 1024 and an omitted `sample_width` to 8, so
+  any core built another size (the Arty AXI monitor is 256 deep) refused
+  the capture with "depth mismatch" unless the client spelled the geometry
+  out. Omitted values are now read from the connected core, as the CLI and
+  GUI already did; a probe file's `sample_width` still wins, and an explicit
+  value that disagrees with the core still fails.
+
 - **MCP — a board with no fpgacapZero cores was reported as a server bug.**
   Transports report a board that answered wrongly as a bare `RuntimeError`,
   which the error classifier filed under `internal` ("report this; it is a
