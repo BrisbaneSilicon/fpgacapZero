@@ -3175,14 +3175,16 @@ def build_mcp_server(
         """Connect to a debug core: the ELA (default), EIO, AXI or UART bridge.
 
         Each core is a separate session on the same cable; open the ones you
-        need, one call each. `chain` is the JTAG USER chain the core sits on:
+        need, one call each. The EIO/AXI/UART sessions need the ELA session
+        open, and reconnecting the ELA closes them, so connect it first.
+        `chain` is the JTAG USER chain the core sits on:
         omit it for the ELA to probe the default and autodetect; it defaults
         to 3 (0 on usb_blaster) for "eio" and to 4 for "axi"/"uart".
 
         Backends: "hw_server" (AMD/Xilinx hw_server, the default), "openocd"
         (any OpenOCD-supported adapter), and "usb_blaster" (Intel/Altera via
         Quartus). For usb_blaster, `hardware` selects the Quartus cable and
-        `quartus_stp` names the quartus_stp executable â€” the latter spawns a
+        `quartus_stp` names the quartus_stp executable — the latter spawns a
         host process, so it is rejected unless fcapz-mcp was started with
         --allow-program (omit it to use the server's configured toolchain).
         `hardware`/`quartus_stp` are rejected for the other backends, and
@@ -3484,7 +3486,7 @@ def build_mcp_server(
         cap). If the trigger has not fired the tool returns
         {"triggered": false, "still_armed": true} rather than erroring, so it is
         safe to call in a poll loop; the core stays armed. On a hit it returns
-        summary metadata only â€” page the data with fcapz_get_capture_samples.
+        summary metadata only — page the data with fcapz_get_capture_samples.
 
         status_only=true reads the capture state machine (armed / triggered /
         done) without waiting or transferring samples; the other arguments
@@ -3556,7 +3558,7 @@ def build_mcp_server(
 
         addr is a byte address (not a word index), as an integer or a hex
         string such as "0x40000000". count is in 32-bit words (default 1,
-        capped at 4096 per call â€” read larger regions in chunks at successive
+        capped at 4096 per call — read larger regions in chunks at successive
         addresses). burst=true uses the bridge's burst read path. The result
         always carries `words` (hex strings); a one-word read adds `value`.
         """

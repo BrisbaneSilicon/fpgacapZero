@@ -285,7 +285,7 @@ same still-running worker guard applies.
 | Tool | Requires | Purpose |
 | --- | --- | --- |
 | `fcapz_status` | always available | Return session state, safety capabilities, MCP server version, and RPC schema version. |
-| `fcapz_connect` | none for plain connect; `--allow-program` if `program=` or a caller-supplied `quartus_stp=` is set | Connect to a debug core: `core` is `"ela"` (default), `"eio"`, `"axi"` or `"uart"`. `chain` selects the JTAG USER chain (ELA: omit to autodetect; EIO: 3, or 0 on `usb_blaster`; AXI/UART: 4). |
+| `fcapz_connect` | none for plain connect; `--allow-program` if `program=` or a caller-supplied `quartus_stp=` is set | Connect to a debug core: `core` is `"ela"` (default), `"eio"`, `"axi"` or `"uart"`. `chain` selects the JTAG USER chain (ELA: omit to autodetect; EIO: 3, or 0 on `usb_blaster`; AXI/UART: 4). The EIO/AXI/UART sessions need the ELA session open, and reconnecting the ELA closes them, so connect it first. |
 | `fcapz_close` | always available | `core="all"` (default) closes the **whole board session** — the ELA plus any EIO/AXI/UART controller; `"eio"`, `"axi"` or `"uart"` closes just that core. Idempotent. |
 | `fcapz_probe` | connected ELA | Read ELA identity, dimensions, and feature registers. |
 | `fcapz_list_cores` | connected ELA | List debug cores on the board (type, JTAG `chain`, identity) so an agent can pick the right chain for side connects. |

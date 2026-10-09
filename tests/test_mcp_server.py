@@ -2943,10 +2943,10 @@ class ConsolidatedToolTests(unittest.TestCase):
 
     def test_connect_core_dispatches_with_each_cores_chain_default(self):
         session = self._session()
+        session.connect_core()  # the ELA first, as RPC requires
         session.connect_core("eio", backend="usb_blaster")
         session.connect_core("axi")
         session.connect_core("uart", chain=2)
-        session.connect_core()  # the ELA
 
         by_cmd = {req["cmd"]: req for req in session.rpc.requests}
         self.assertEqual(by_cmd["eio_connect"]["chain"], 0)
