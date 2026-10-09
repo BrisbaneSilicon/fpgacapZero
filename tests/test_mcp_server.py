@@ -2970,6 +2970,12 @@ class ConsolidatedToolTests(unittest.TestCase):
             session.connect_core("dma")
         self.assertEqual(session.rpc.requests, [])
 
+    def test_a_side_core_names_the_missing_ela_session(self):
+        session = self._session()
+        with self.assertRaisesRegex(NotConnectedError, r"fcapz_connect\(core='ela'\)"):
+            session.connect_core("axi")
+        self.assertEqual(session.rpc.requests, [])
+
     def test_close_core_closes_one_core_or_the_whole_session(self):
         session = self._session()
         session.connect_core()

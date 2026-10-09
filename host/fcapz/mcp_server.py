@@ -2731,6 +2731,14 @@ class FcapzMcpSession:
             raise ValueError("program= applies to core='ela' only")
         if single_chain_burst is not True:
             raise ValueError("single_chain_burst applies to core='ela' only")
+        if not self.connected:
+            # RPC refuses every side connect without an ELA session, with a
+            # bare "not connected" that an agent which just called connect
+            # cannot act on.
+            raise NotConnectedError(
+                f"core={core!r} rides on the ELA session; call "
+                "fcapz_connect(core='ela') first"
+            )
         opener = {
             "eio": self.eio_connect,
             "axi": self.axi_connect,

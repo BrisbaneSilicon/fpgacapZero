@@ -296,8 +296,6 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   GUI already did; a probe file's `sample_width` still wins, and an explicit
   value that disagrees with the core still fails.
 
-- **MCP — three tool descriptions carried a mis-encoded em dash.**
-
 - **MCP — a board with no fpgacapZero cores was reported as a server bug.**
   Transports report a board that answered wrongly as a bare `RuntimeError`,
   which the error classifier filed under `internal` ("report this; it is a
