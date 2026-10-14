@@ -110,7 +110,8 @@ connected. The panels:
   core gets a **Use this core** button that switches to it in one click. EIO
   is also auto-discovered into its own panel on connect.
 - **ELA** — the capture configuration: channel, pre/post-trigger window,
-  segmented capture, run-length capture (on cores built with `RLE_W`), and
+  segmented capture, run-length capture (on cores built with `RLE_W`, with
+  an optional post-trigger clock limit), and
   **probe definitions** (load a `.prob` file or type
   `name:width:lsb` lines to get named signals in the waveform and the
   Trigger tab).

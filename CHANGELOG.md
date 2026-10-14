@@ -18,9 +18,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   place entries at their start clocks, and `expand_run_lengths()` restores one
   sample per clock. Pre/post-trigger windows count entries. Counts read back on
   the timestamp burst lane (`BURST_PTR[31:30]=2'b11`) or the USER1 timestamp
-  window. New registers `RLE_CTRL` (0x00A8) and `RLE_W` (0x00CC). Both HDLs and
-  all standalone ELA wrappers; `RLE_W=0` builds and behaves exactly as before.
-  Not combinable with decimation or storage qualification. The DE25-Nano
+  window. New registers `RLE_CTRL` (0x00A8) and `RLE_W` (0x00CC). An optional
+  post-trigger clock limit (`RLE_POST_CLKS`, 0x0090; `CaptureConfig.post_clocks`,
+  `--post-clocks`, RPC `post_clocks`, GUI and web fields) also ends the window
+  N sample clocks after the trigger, so a quiet signal cannot hold it open.
+  Both HDLs and all standalone ELA wrappers; `RLE_W=0` builds and behaves
+  exactly as before. Not combinable with decimation or storage qualification. The DE25-Nano
   reference design builds with `RLE_W=16` and a second ELA channel that holds
   each value for 8 clocks, and is hardware-validated with it.
 

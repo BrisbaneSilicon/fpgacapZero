@@ -237,6 +237,7 @@ cfg = CaptureConfig(
     trigger_holdoff = 0,           # ignore triggers for N cycles after arm/re-arm
     trigger_delay   = 0,           # new in v0.3.0
     rle             = False,       # run-length capture (RLE_W cores, v0.5.0)
+    post_clocks     = 0,           # with rle: end the window N clocks after the trigger
 )
 a.configure(cfg)
 ```
@@ -384,11 +385,15 @@ class CaptureConfig:
     trigger_holdoff:  int = 0       # 0..65535 cycles after arm/re-arm
     trigger_delay:    int = 0       # 0..65535 sample-clock cycles
     rle:              bool = False  # run-length capture; needs RLE_W > 0
+    post_clocks:      int = 0       # with rle: post-trigger clock limit (0 = off)
 ```
 
 `configure()` raises `ValueError` if `rle=True` on a core that reports
 `RLE_W=0`, or together with decimation or storage qualification. On an
 `RLE_W` core it always writes the enable, so `rle=False` turns it off.
+It raises if `post_clocks` is negative or set without `rle=True`. It writes
+`RLE_POST_CLKS` on every `RLE_W` core (0 when `rle` is off), clamped to the
+register width; a larger limit could never be reached.
 
 ### `TriggerConfig`
 

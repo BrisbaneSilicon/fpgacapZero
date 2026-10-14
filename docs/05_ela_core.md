@@ -460,12 +460,39 @@ What changes when it is on:
   sample always starts a new entry, so its time is exact.
 - `result.samples` holds the entries and `result.run_lengths` the clocks
   each one covers. The capture ends on the clock its last entry starts, so
-  that entry reports 1.
+  that entry reports 1 (unless a clock limit ends it; see below).
 - VCD, the GUI preview and the web viewer place each entry at its start
   clock. CSV adds a `run_length` column and JSON a `run_lengths` list.
 - Each segment starts with a new entry.
 - It cannot be combined with decimation or storage qualification. The host
   refuses that config, and the core ignores the enable while either is on.
+
+### Ending the post-trigger window after N clocks
+
+An entry-based window can wait a long time on a quiet signal: 256
+post-trigger entries of a bus that rarely changes may take minutes to fill.
+`post_clocks` also ends the window N sample clocks after the trigger,
+whichever comes first:
+
+```python
+cfg = CaptureConfig(pretrigger=64, posttrigger=256, trigger=trig,
+                    rle=True, post_clocks=10_000)
+```
+
+```bash
+fcapz capture --rle --posttrigger 256 --post-clocks 10000 ...
+```
+
+- The trigger is clock 0, so a limit of N covers clocks 0..N.
+- The capture then holds fewer entries than `pre + post + 1`. `CAPTURE_LEN`
+  and `len(result.samples)` report what was stored. On a segmented core
+  each segment keeps its own length.
+- The last entry keeps the clocks it covered up to the stop, so its run
+  length can be more than 1.
+- 0 (the default) turns the limit off. It needs `rle=True`; the host
+  refuses `post_clocks` without it.
+- The GUI and web interface show a **Post-trigger clock limit** field while
+  the run-length box is checked.
 
 Counts travel on the timestamp burst lane (`BURST_PTR[31:30]=2'b11`), so
 they read back as fast as timestamps. Builds without a burst reader read

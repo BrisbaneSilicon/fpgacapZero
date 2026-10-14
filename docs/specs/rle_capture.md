@@ -18,6 +18,8 @@ default) builds none of it, and the core behaves and costs exactly as today.
 - New RO register `RLE_W` at `0x00CC` reads the parameter. It reads 0 on cores
   without RLE (unknown addresses read 0), so it is also the capability bit.
   (`0x00E8` and `0x00EC` are not used: the AXI monitor answers there.)
+- New RW register `RLE_POST_CLKS` at `0x0090` (see Post-trigger clock
+  limit).
 - New RW register `RLE_CTRL` at `0x00A8`:
   - bit 0 = enable. Resets to 0, so an RLE core boots and captures exactly
     like a non-RLE one until the host turns it on. Taken on arm, like the
@@ -69,17 +71,39 @@ same `probe_prev` the RAM stores.
 - The pre-trigger ring wraps whole entries: the oldest entry is overwritten
   together with its count.
 - The last post-trigger entry ends the capture on the clock it opens, so its
-  count is 0. The capture covers exactly `sum(count + 1)` clocks, ending one
-  clock after the last entry starts, so no extra end-time register is needed.
+  count is 0 (a clock limit can end it later; see below). The capture covers
+  exactly `sum(count + 1)` clocks, so no extra end-time register is needed.
   Waveforms end there.
 - An entry still open when the capture ends is never left half-written,
   because the count is written on every extend.
 
-**Open question (needs the owner's call):** entry-based windows are the v1
-default. An optional cycle-based stop ("end the post-trigger window after N
-clocks or N entries, whichever comes first") would bound a capture that
-otherwise waits forever on an idle bus. It needs a second counter and a
-register. It can come later without breaking v1.
+## Post-trigger clock limit
+
+An entry-based window can wait forever on an idle bus. `RLE_POST_CLKS`
+(`0x0090`, RW) also ends it after N clocks, whichever comes first:
+
+- The trigger commit is clock 0. The window covers clocks 0..N, so
+  `sum(count + 1)` over the post-trigger entries is N + 1 when the limit
+  wins. 0 (the reset value) means no limit.
+- Width `min(32, LEN_W + RLE_W)`: the most clocks a window of entries can
+  span. The register reads back the bits kept. CDC and arm latch as for
+  `TRIG_DELAY`. Active only while RLE is on (`rle_active`), so a non-RLE
+  capture ignores it.
+- A down-counter loaded at the commit and a registered "last clock" flag,
+  so the stop starts at a flop. The stop clock uses the one completion path
+  the entry limit uses; it stores that clock as usual, either as a new entry
+  or as an extend of the open one. So the last entry can have count > 0.
+- `CAPTURE_LEN` reports the entries stored:
+  `pre + post + 1 - post_left`, plus one if the stop clock opens an entry.
+  Segmented builds keep each segment's length (`seg_len`, snapshotted to the
+  JTAG side like the segment start pointers). `CAPTURE_LEN` and the DATA
+  window bound follow `SEG_SEL` there; the host already reads `CAPTURE_LEN`
+  per segment.
+- Cost: about 5 x the register width in flip-flops, plus
+  3 x `NUM_SEGMENTS` x `LEN_W` with segments.
+- Host: `CaptureConfig.post_clocks` (0 = off), CLI `--post-clocks`, RPC
+  `post_clocks`, a GUI spinner and a web field. `configure()` refuses it
+  without `rle` and clamps it to the register width.
 
 ## Interactions (v1)
 
@@ -128,7 +152,8 @@ Counts travel on the timestamp lane, so no new burst format exists.
 - VCD and the other exporters place each entry at its start clock, from the
   run lengths.
 - GUI and web: a checkbox on RLE cores; previews and the trigger marker use
-  clock time, not entry index.
+  clock time, not entry index. A post-trigger clock limit field while it is
+  checked.
 - RPC and CLI: `rle` flag and the run lengths in the capture reply.
 - Old bitstreams: `RLE_W` reads 0, `rle` defaults to False, and nothing
   changes.
@@ -139,7 +164,9 @@ Counts travel on the timestamp lane, so no new burst format exists.
   clock then holds, runs of 1, long runs, saturation at `2^RLE_W`,
   trigger in the middle of a run, ring wrap during pre-trigger, segments,
   pre-arm history across arm, RLE rejected with decimation / qualification,
-  `RLE_W=0` unchanged.
+  `RLE_W=0` unchanged. The clock limit: stops inside a run, on a new entry,
+  on the same clock as the entry limit, after it, with a trigger delay, with
+  RLE off (ignored), and per segment with unequal lengths.
 - Host unit tests for expansion, exports, and the config checks.
 - Verilator lint, static parity, hardware run on a board build with
   `RLE_W=16`: the DE25-Nano reference design (both variants) runs

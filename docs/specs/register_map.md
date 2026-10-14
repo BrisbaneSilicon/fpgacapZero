@@ -48,7 +48,7 @@ in that bridge’s section.
 | `0x0010` | DEPTH | RO | Total capture depth in samples. |
 | `0x0014` | PRETRIG_LEN | RW | Pre-trigger sample count. |
 | `0x0018` | POSTTRIG_LEN | RW | Post-trigger sample count. |
-| `0x001C` | CAPTURE_LEN | RO | Captured sample count for the current or most recent run. |
+| `0x001C` | CAPTURE_LEN | RO | Captured sample count for the current or most recent run. On a segmented `RLE_W` core it is the length of the segment `SEG_SEL` selects (0 until that segment completes), because a clock limit (`RLE_POST_CLKS`) can end segments at different lengths. |
 | `0x0020` | TRIG_MODE | RW | Trigger mode; see [TRIG_MODE](#regmap-trig-mode). |
 | `0x0024` | TRIG_VALUE | RW | Trigger comparator value. |
 | `0x0028` | TRIG_MASK | RW | Trigger comparator mask. |
@@ -62,6 +62,7 @@ in that bridge’s section.
 | `0x0040 + N*20 + 8` | SEQ_STAGE_N_MASK_A | RW | Sequencer stage N comparator A mask. |
 | `0x0040 + N*20 + 12` | SEQ_STAGE_N_VALUE_B | RW | Sequencer stage N comparator B match value. |
 | `0x0040 + N*20 + 16` | SEQ_STAGE_N_MASK_B | RW | Sequencer stage N comparator B mask. |
+| `0x0090` | RLE_POST_CLKS | RW | `RLE_W` cores only. Post-trigger clock limit for run-length captures: the post-trigger window also ends this many sample clocks after the trigger commit (clock 0), if `POSTTRIG_LEN` entries have not ended it first. `CAPTURE_LEN` then reports the entries stored. 0 = no limit (reset value). `min(32, clog2(DEPTH+1) + RLE_W)` bits wide; taken on arm; ignored while run-length capture is off. |
 | `0x00A8` | RLE_CTRL | RW | `RLE_W` cores only. Bit 0 = run-length capture enable, taken on arm (resets to 0). Bit 1 = the timestamp DATA window returns run counts instead of timestamps; arm and soft reset clear it. The core ignores bit 0 while decimation or storage qualification is on. See [Run-length capture](../05_ela_core.md#run-length-capture). |
 | `0x00CC` | RLE_W | RO | Run-count width (`RLE_W` parameter). 0 = no run-length capture; this is also the capability bit. |
 | `0x00D4` | TRIG_DELAY | RW | Post-trigger delay in sample-clock cycles (0..65535). When non-zero, the committed trigger sample shifts N cycles after the trigger event. |
