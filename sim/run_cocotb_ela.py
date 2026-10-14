@@ -45,6 +45,7 @@ BASE_PARAMETERS = {
     "REL_COMPARE": 0,
     "DUAL_COMPARE": 1,
     "USER1_DATA_EN": 1,
+    "RLE_W": 0,
 }
 
 
@@ -72,6 +73,16 @@ SEQUENCER_TESTS = (
     "sequencer_counts_first_hit_after_holdoff",
     "sequencer_next_stage_ignores_previous_stage_match",
     "sequencer_matches_cycle_reference",
+)
+
+RLE_TESTS = (
+    "rle_registers",
+    "rle_entries_expand_to_the_driven_clocks",
+    "rle_changing_every_clock_then_holding",
+    "rle_trigger_delay_splits_the_run",
+    "rle_count_saturates_into_a_new_entry",
+    "rle_off_stores_every_clock",
+    "rle_counts_burst_on_the_timestamp_lane",
 )
 
 TARGETS: tuple[CocotbTarget, ...] = (
@@ -200,6 +211,17 @@ TARGETS: tuple[CocotbTarget, ...] = (
         )
         for pipe in (0, 1, 2, 3)
     ),
+    # Run-length capture: counts on their own lane, on the timestamp lane,
+    # through the input pipe, with decimation built in, and with segments.
+    CocotbTarget("rle8", {"RLE_W": 8, "DEPTH": 32}, RLE_TESTS + ("rle_prearm_history_is_entries",)),
+    CocotbTarget("rle3_pipe1_decim", {"RLE_W": 3, "DEPTH": 32, "INPUT_PIPE": 1, "DECIM_EN": 1},
+                 RLE_TESTS),
+    CocotbTarget("rle16_ts32_pipe1", {"RLE_W": 16, "DEPTH": 32, "TIMESTAMP_W": 32,
+                                      "INPUT_PIPE": 1},
+                 RLE_TESTS + ("rle_prearm_history_is_entries",)),
+    CocotbTarget("rle4_ts48_seg4", {"RLE_W": 4, "DEPTH": 64, "TIMESTAMP_W": 48,
+                                    "NUM_SEGMENTS": 4},
+                 ("rle_registers", "rle_segments_start_new_entries")),
     CocotbTarget(
         "config_min",
         {"TRIG_STAGES": 1, "STOR_QUAL": 0, "DECIM_EN": 0, "EXT_TRIG_EN": 0, "DUAL_COMPARE": 0},

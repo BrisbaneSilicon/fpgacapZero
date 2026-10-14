@@ -149,6 +149,21 @@ TARGETS = (
         top="fcapz_ela",
         sources=ELA_CORE,
     ),
+    # Run-length capture: counts on their own lane, and on the timestamp
+    # lane with the input pipe and segments.
+    LintTarget(
+        name="fcapz_ela_rle",
+        top="fcapz_ela",
+        sources=ELA_CORE,
+        extra_flags=("-GRLE_W=8",),
+    ),
+    LintTarget(
+        name="fcapz_ela_rle_ts",
+        top="fcapz_ela",
+        sources=ELA_CORE,
+        extra_flags=("-GRLE_W=16", "-GTIMESTAMP_W=32", "-GINPUT_PIPE=1",
+                     "-GNUM_SEGMENTS=4", "-GSAMPLE_W=40"),
+    ),
     LintTarget(
         name="fcapz_eio",
         top="fcapz_eio",

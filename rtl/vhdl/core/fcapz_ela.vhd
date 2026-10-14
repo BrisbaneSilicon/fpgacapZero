@@ -38,6 +38,7 @@ entity fcapz_ela is
         REL_COMPARE      : natural  := 0;
         DUAL_COMPARE     : natural  := 1;
         USER1_DATA_EN    : natural  := 1;
+        RLE_W            : natural  := 0;   -- 0 = no run-length capture, 1..16 = run-count width
         WIDE_TRIG        : natural  := 0
     );
     port (
@@ -60,7 +61,8 @@ entity fcapz_ela is
         burst_rd_addr    : in  std_logic_vector(fcapz_clog2(DEPTH) - 1 downto 0);
         burst_rd_active  : in  std_logic;
         burst_rd_data    : out std_logic_vector(SAMPLE_W - 1 downto 0);
-        burst_rd_ts_data : out std_logic_vector(fcapz_nonzero_width(TIMESTAMP_W) - 1 downto 0);
+        -- Timestamps, or run counts when the burst asks for them (BURST_PTR[30]).
+        burst_rd_ts_data : out std_logic_vector(fcapz_nonzero_width(fcapz_ela_aux_w(TIMESTAMP_W, RLE_W)) - 1 downto 0);
         burst_start      : out std_logic;
         burst_timestamp  : out std_logic;
         burst_start_ptr  : out std_logic_vector(fcapz_clog2(DEPTH) - 1 downto 0)
@@ -184,7 +186,14 @@ architecture rtl of fcapz_ela is
     -- the stored sample and both compare operands come from the new one, as
     -- in rtl/fcapz_ela.v.
     constant SEL_FLUSH_LEN    : positive := PROBE_PIPE + bool_to_nat(PROBE_PIPE > 0) + 1;
-    constant TS_WORDS         : natural := (TIMESTAMP_W + 31) / 32;
+    constant HAS_RLE          : boolean := RLE_W > 0;
+    constant RLE_DATA_W       : positive := fcapz_nonzero_width(RLE_W);
+    constant RLE_COUNT_MAX    : unsigned(RLE_DATA_W - 1 downto 0) := (others => '1');
+    -- Aux lane (timestamp burst lane and DATA window): timestamps, or run
+    -- counts on a core without timestamps.
+    constant AUX_W            : natural := fcapz_ela_aux_w(TIMESTAMP_W, RLE_W);
+    constant AUX_DATA_W       : positive := fcapz_nonzero_width(AUX_W);
+    constant AUX_WORDS        : natural := (AUX_W + 31) / 32;
 
     constant ADDR_VERSION      : natural := 16#0000#;
     constant ADDR_CTRL         : natural := 16#0004#;
@@ -221,6 +230,10 @@ architecture rtl of fcapz_ela is
     constant ADDR_COMPARE_CAPS : natural := 16#00E0#;
     constant ADDR_WIDE_SEL     : natural := 16#00E4#;
     constant ADDR_WIDE_DATA    : natural := 16#00F0#;
+    -- Run-length capture (RLE_W > 0).  RLE_CTRL[0] enables it (taken on
+    -- arm); RLE_CTRL[1] makes the timestamp DATA window return run counts.
+    constant ADDR_RLE_CTRL     : natural := 16#00A8#;  -- RW
+    constant ADDR_RLE_W        : natural := 16#00CC#;  -- RO: RLE_W (0 = no RLE)
     constant ADDR_DATA_BASE    : natural := 16#0100#;
 
     -- Full-width comparator A programmability (mirrors the Verilog WIDE_TRIG).
@@ -412,6 +425,29 @@ architecture rtl of fcapz_ela is
     signal sq_mode_on        : std_logic := '0';
     signal arm_voids_history : std_logic := '0';
     signal sel_flush_active  : std_logic := '0';
+    signal capture_restart   : std_logic := '0';
+    -- Run-length capture: [0]=enable, [1]=DATA window reads counts
+    signal jtag_rle_ctrl     : std_logic_vector(1 downto 0) := "00";
+    signal burst_rle         : std_logic := '0';  -- this burst reads run counts
+    signal rle_en_sync1      : std_logic := '0';
+    signal rle_en_sync2      : std_logic := '0';
+    signal rle_active_next   : std_logic := '0';
+    signal arm_rle_change    : std_logic := '0';
+    signal rle_active        : std_logic := '0';  -- latched on arm
+    signal rle_open          : std_logic := '0';  -- the newest entry can still be extended
+    signal rle_value         : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
+    signal rle_count         : unsigned(RLE_DATA_W - 1 downto 0) := (others => '0');  -- run length - 1
+    signal rle_addr          : natural range 0 to DEPTH - 1 := 0;
+    signal comb_store_base   : std_logic := '0';
+    signal comb_rle_repeat   : std_logic := '0';
+    signal rle_extend        : std_logic := '0';
+    signal rle_seg_end       : std_logic := '0';
+    signal rle_we_q          : std_logic := '0';
+    signal rle_wr_addr_q     : std_logic_vector(PTR_W - 1 downto 0) := (others => '0');
+    signal rle_wr_count_q    : std_logic_vector(RLE_DATA_W - 1 downto 0) := (others => '0');
+    signal rle_dout_b        : std_logic_vector(RLE_DATA_W - 1 downto 0);
+    signal aux_ts_b          : std_logic_vector(AUX_DATA_W - 1 downto 0);
+    signal aux_rle_b         : std_logic_vector(AUX_DATA_W - 1 downto 0);
     signal sel_flush_count   : natural range 0 to SEL_FLUSH_LEN - 1 := 0;
     signal jtag_rdata_mux    : std_logic_vector(31 downto 0) := (others => '0');
     signal jtag_rdata_i      : std_logic_vector(31 downto 0) := (others => '0');
@@ -540,15 +576,15 @@ architecture rtl of fcapz_ela is
         return r;
     end function;
 
-    function ts_chunk_word(ts : std_logic_vector(TS_WIDTH - 1 downto 0); chunk : natural) return std_logic_vector is
+    function aux_chunk_word(aux : std_logic_vector(AUX_DATA_W - 1 downto 0); chunk : natural) return std_logic_vector is
         variable r : std_logic_vector(31 downto 0) := (others => '0');
         variable bit_base : natural;
     begin
-        if TIMESTAMP_W > 0 then
+        if AUX_W > 0 then
             bit_base := chunk * 32;
             for i in 0 to 31 loop
-                if bit_base + i < TIMESTAMP_W then
-                    r(i) := ts(bit_base + i);
+                if bit_base + i < AUX_W then
+                    r(i) := aux(bit_base + i);
                 end if;
             end loop;
         end if;
@@ -624,6 +660,14 @@ begin
     assert DEFAULT_TRIG_EXT >= 0 and DEFAULT_TRIG_EXT <= 3
         report "fcapz_ela: DEFAULT_TRIG_EXT must be 0-3"
         severity failure;
+    assert RLE_W <= 16
+        report "fcapz_ela: RLE_W must be 0-16"
+        severity failure;
+    -- Counts share the timestamp lane of a core that has one, so they must
+    -- fit it.
+    assert TIMESTAMP_W = 0 or RLE_W <= TIMESTAMP_W
+        report "fcapz_ela: RLE_W must not exceed TIMESTAMP_W"
+        severity failure;
 
     trigger_out <= trigger_out_i when EXT_TRIG_EN /= 0 else '0';
     armed_out <= armed;
@@ -638,7 +682,7 @@ begin
     jtag_rdata <= jtag_rdata_i;
     burst_start_ptr <= burst_start_ptr_i;
     burst_rd_data <= sample_mem_dout_b;
-    burst_rd_ts_data <= ts_mem_dout_b;
+    burst_rd_ts_data <= aux_rle_b when burst_rle = '1' else aux_ts_b;
     mem_we_a_ram <= mem_we_a_q when PROBE_PIPE > 0 else mem_we_a;
     sample_mem_din_ram <= mem_wr_data_q when PROBE_PIPE > 0 else sample_mem_din;
     ts_mem_din_ram <= mem_wr_ts_q when PROBE_PIPE > 0 else ts_mem_din;
@@ -648,7 +692,7 @@ begin
                   (others => '0');
     jtag_rd_data_window <= '1' when USER1_DATA_EN /= 0 and
                            (to_integer(unsigned(jtag_addr)) >= ADDR_DATA_BASE or
-                            (TIMESTAMP_W > 0 and to_integer(unsigned(jtag_addr)) >= ADDR_TS_DATA_BASE)) else '0';
+                            (AUX_W > 0 and to_integer(unsigned(jtag_addr)) >= ADDR_TS_DATA_BASE)) else '0';
     datawin_req_now <= jtag_rd_en and jtag_rd_data_window;
     rb_meta_sample_busy <= rb_meta_toggle_sample xor rb_meta_ack_sync2;
     rb_meta_event_sample <= '1' when (done = '1' and rb_done_d = '0') or
@@ -680,8 +724,17 @@ begin
                            unsigned(sq_mode_sync2(3 downto 0)) /= 0 and
                            unsigned(sq_mode_sync2(3 downto 0)) <= 9 else '0';
     arm_sq_bubble <= '1' when PROBE_PIPE > 0 and sq_mode_on = '1' else '0';
+    -- Run-length capture is on only without decimation and qualification,
+    -- so a count always means consecutive sample clocks.  Turning it on or
+    -- off on an arm changes what the history entries mean.
+    rle_active_next <= '1' when HAS_RLE and rle_en_sync2 = '1' and decim_sync2 = 0 and
+                                sq_mode_on = '0' else '0';
+    arm_rle_change <= '1' when HAS_RLE and rle_active_next /= rle_active else '0';
     -- Arms after which the rolling pre-arm history cannot be trusted.
-    arm_voids_history <= arm_sel_change or arm_sq_bubble;
+    arm_voids_history <= arm_sel_change or arm_sq_bubble or arm_rle_change;
+    -- An arm or soft reset restarts the capture on this edge.
+    capture_restart <= (arm_toggle_sync1 xor arm_toggle_sync2) or startup_arm_pending or
+                       (reset_toggle_sync1 xor reset_toggle_sync2);
 
     p_sel_flush : process(sample_clk, sample_rst)
     begin
@@ -740,6 +793,86 @@ begin
         ts_mem_dout_b <= (others => '0');
     end generate;
 
+    -- Run-length capture: count RAM, as in rtl/fcapz_ela.v.  A store opens
+    -- an entry with count 0.  A repeat of the newest entry's sample in a
+    -- cycle that would have stored extends it instead: the count goes up
+    -- and is rewritten at the entry's address.  The count write is
+    -- registered so a new entry and the next cycle's extend of it reach the
+    -- RAM in order whatever PROBE_PIPE is.
+    rle_extend <= '1' when comb_rle_repeat = '1' and comb_store_base = '1' and
+                           comb_trigger_commit_now = '0' and
+                           ((done = '0' and triggered = '0') or
+                            (armed = '1' and done = '0' and triggered = '1' and post_left_zero = '0'))
+                  else '0';
+    -- This cycle completes the segment (or the capture); the next segment's
+    -- first sample must open its own entry.
+    rle_seg_end <= '1' when armed = '1' and done = '0' and capture_restart = '0' and triggered = '1' and
+                            (post_left_zero = '1' or (comb_store_ok = '1' and post_left_one = '1'))
+                   else '0';
+
+    p_rle : process(sample_clk, sample_rst)
+    begin
+        if sample_rst = '1' then
+            rle_open <= '0';
+            rle_value <= (others => '0');
+            rle_count <= (others => '0');
+            rle_addr <= 0;
+            rle_we_q <= '0';
+            rle_wr_addr_q <= (others => '0');
+            rle_wr_count_q <= (others => '0');
+        elsif rising_edge(sample_clk) then
+            rle_we_q <= bool_to_sl(HAS_RLE) and (mem_we_a or rle_extend);
+            if mem_we_a = '1' then
+                rle_wr_addr_q <= mem_wr_addr;
+                rle_wr_count_q <= (others => '0');
+            else
+                rle_wr_addr_q <= std_logic_vector(to_unsigned(rle_addr, PTR_W));
+                rle_wr_count_q <= std_logic_vector(rle_count + 1);
+            end if;
+            if not HAS_RLE or capture_restart = '1' or sel_flush_active = '1' or rle_seg_end = '1' then
+                rle_open <= '0';
+            elsif mem_we_a = '1' then
+                rle_open <= rle_active;
+                rle_value <= sample_mem_din;
+                rle_count <= (others => '0');
+                rle_addr <= wr_ptr;
+            elsif rle_extend = '1' then
+                rle_count <= rle_count + 1;
+            end if;
+        end if;
+    end process;
+
+    g_rle_mem : if HAS_RLE generate
+        u_rlebuf : entity work.fcapz_dpram
+            generic map (
+                WIDTH => RLE_DATA_W,
+                DEPTH => DEPTH
+            )
+            port map (
+                clk_a  => sample_clk,
+                we_a   => rle_we_q,
+                addr_a => rle_wr_addr_q,
+                din_a  => rle_wr_count_q,
+                dout_a => open,
+                clk_b  => jtag_clk,
+                addr_b => mem_addr_b,
+                dout_b => rle_dout_b
+            );
+    end generate;
+
+    g_no_rle_mem : if not HAS_RLE generate
+        rle_dout_b <= (others => '0');
+    end generate;
+
+    -- Aux lane: timestamps, or run counts.
+    g_aux_ts : if TIMESTAMP_W > 0 generate
+        aux_ts_b <= ts_mem_dout_b;  -- AUX_W = TIMESTAMP_W
+    end generate;
+    g_aux_no_ts : if TIMESTAMP_W = 0 generate
+        aux_ts_b <= (others => '0');
+    end generate;
+    aux_rle_b <= std_logic_vector(resize(unsigned(rle_dout_b), AUX_DATA_W));
+
     p_mem_write_cmd : process(all)
         variable active_probe : std_logic_vector(SAMPLE_W - 1 downto 0);
         variable compare_probe : std_logic_vector(SAMPLE_W - 1 downto 0);
@@ -754,6 +887,9 @@ begin
         variable sq_eff : boolean;
         variable store_tick : boolean;
         variable store_ok : boolean;
+        variable store_base : boolean;
+        variable rle_sample : std_logic_vector(SAMPLE_W - 1 downto 0);
+        variable rle_repeat : boolean;
         variable trigger_commit_now : boolean;
         variable probe_idx : natural;
     begin
@@ -891,7 +1027,17 @@ begin
         else
             sq_eff := sq_ok;
         end if;
-        store_ok := store_tick and sq_eff and sel_flush_active = '0';
+        store_base := store_tick and sq_eff and sel_flush_active = '0';
+        -- Run-length capture: the sample the RAM would store, and whether it
+        -- only extends the newest entry instead of opening a new one.
+        if PROBE_PIPE > 0 then
+            rle_sample := probe_prev;
+        else
+            rle_sample := active_probe;
+        end if;
+        rle_repeat := rle_active = '1' and rle_open = '1' and rle_sample = rle_value and
+                      rle_count /= RLE_COUNT_MAX;
+        store_ok := store_base and not rle_repeat;
         -- An arm or soft reset on this edge takes priority (see p_capture).
         trigger_commit_now := armed = '1' and done = '0' and triggered = '0' and
                               (arm_toggle_sync1 xor arm_toggle_sync2) = '0' and
@@ -904,6 +1050,8 @@ begin
         comb_hit_eff <= hit_eff;
         comb_sq_ok <= bool_to_sl(sq_ok);
         comb_store_ok <= bool_to_sl(store_ok);
+        comb_store_base <= bool_to_sl(store_base);
+        comb_rle_repeat <= bool_to_sl(rle_repeat);
         comb_trigger_commit_now <= bool_to_sl(trigger_commit_now);
         comb_seq_stage_hit <= seq_stage_hit;
 
@@ -994,6 +1142,7 @@ begin
             trig_mask <= (others => '1');
             trig_value_b <= (others => '0');
             trig_mask_b <= (others => '1');
+            rle_active <= '0';
             chan_sel <= 0;
             probe_sel <= 0;
             decim_ratio <= (others => '0');
@@ -1055,6 +1204,7 @@ begin
                     trig_value_b <= (others => '0');
                     trig_mask_b <= (others => '1');
                 end if;
+                rle_active <= rle_active_next;
                 chan_sel <= chan_sel_next;
                 probe_sel <= probe_sel_next;
                 -- From the synchronisers, like every other field latched
@@ -1167,6 +1317,8 @@ begin
             reset_toggle_jtag <= '0';
             burst_start <= '0';
             burst_timestamp <= '0';
+            burst_rle <= '0';
+            jtag_rle_ctrl <= "00";
             burst_start_ptr_i <= (others => '0');
         elsif rising_edge(jtag_clk) then
             addr := to_integer(unsigned(jtag_addr));
@@ -1179,6 +1331,10 @@ begin
                         end if;
                         if jtag_wdata(1) = '1' then
                             reset_toggle_jtag <= not reset_toggle_jtag;
+                        end if;
+                        -- Arm and reset return the DATA window to timestamps.
+                        if jtag_wdata(0) = '1' or jtag_wdata(1) = '1' then
+                            jtag_rle_ctrl(1) <= '0';
                         end if;
                     when ADDR_PRETRIG =>
                         jtag_pretrig_len <= jtag_wdata;
@@ -1242,6 +1398,10 @@ begin
                         if NUM_SEGMENTS > 1 then
                             jtag_seg_sel <= to_integer(unsigned(jtag_wdata(SEG_IDX_W - 1 downto 0))) mod NUM_SEGMENTS;
                         end if;
+                    when ADDR_RLE_CTRL =>
+                        if HAS_RLE then
+                            jtag_rle_ctrl <= jtag_wdata(1 downto 0);
+                        end if;
                     when ADDR_STARTUP_ARM =>
                         jtag_startup_arm <= jtag_wdata(0);
                     when ADDR_TRIG_DELAY =>
@@ -1251,6 +1411,7 @@ begin
                     when ADDR_BURST_PTR =>
                         burst_start <= not burst_start;
                         burst_timestamp <= jtag_wdata(31);
+                        burst_rle <= bool_to_sl(HAS_RLE) and jtag_wdata(31) and jtag_wdata(30);
                         if NUM_SEGMENTS > 1 then
                             burst_start_ptr_i <= std_logic_vector(to_unsigned(rb_seg_start_ptr_jtag(jtag_seg_sel), PTR_W));
                         else
@@ -1320,11 +1481,11 @@ begin
         -- WORDS_PER_SAMPLE > 1; it is unused on an under-base read.
         sample_index := integer'high;
 
-        if TIMESTAMP_W > 0 and addr >= ADDR_TS_DATA_BASE then
+        if AUX_W > 0 and addr >= ADDR_TS_DATA_BASE then
             datawin_is_ts_comb <= '1';
             word_index := (addr - ADDR_TS_DATA_BASE) / 4;
-            sample_index := word_index / TS_WORDS;
-            datawin_chunk_comb <= word_index mod TS_WORDS;
+            sample_index := word_index / AUX_WORDS;
+            datawin_chunk_comb <= word_index mod AUX_WORDS;
         elsif addr >= ADDR_DATA_BASE then
             word_index := (addr - ADDR_DATA_BASE) / 4;
             sample_index := word_index / WORDS_PER_SAMPLE;
@@ -1440,6 +1601,8 @@ begin
             trig_delay_sync2 <= (others => '0');
             trig_holdoff_sync1 <= (others => '0');
             trig_holdoff_sync2 <= (others => '0');
+            rle_en_sync1 <= '0';
+            rle_en_sync2 <= '0';
             sq_mode_sync1 <= (others => '0');
             sq_mode_sync2 <= (others => '0');
             sq_value_sync1 <= (others => '0');
@@ -1481,6 +1644,8 @@ begin
             trig_delay_sync2 <= trig_delay_sync1;
             trig_holdoff_sync1 <= unsigned(jtag_trig_holdoff);
             trig_holdoff_sync2 <= trig_holdoff_sync1;
+            rle_en_sync1 <= bool_to_sl(HAS_RLE) and jtag_rle_ctrl(0);
+            rle_en_sync2 <= rle_en_sync1;
             sq_mode_sync1 <= jtag_sq_mode;
             sq_mode_sync2 <= sq_mode_sync1;
             sq_value_sync1 <= jtag_sq_value;
@@ -1971,7 +2136,11 @@ begin
                 if datawin_oob_q = '1' then
                     jtag_rdata_i <= (others => '0');
                 elsif datawin_is_ts_q = '1' then
-                    jtag_rdata_i <= ts_chunk_word(ts_mem_dout_b, datawin_chunk_q);
+                    if jtag_rle_ctrl(1) = '1' then
+                        jtag_rdata_i <= aux_chunk_word(aux_rle_b, datawin_chunk_q);
+                    else
+                        jtag_rdata_i <= aux_chunk_word(aux_ts_b, datawin_chunk_q);
+                    end if;
                 else
                     jtag_rdata_i <= sample_chunk_word(sample_mem_dout_b, datawin_chunk_q);
                 end if;
@@ -2045,6 +2214,12 @@ begin
                 if HAS_WIDE_TRIG then
                     r(7 downto 0) := jtag_wide_sel;
                 end if;
+            when ADDR_RLE_CTRL =>
+                r := (others => '0');
+                if HAS_RLE then
+                    r(1 downto 0) := jtag_rle_ctrl;
+                end if;
+            when ADDR_RLE_W => r := u32(RLE_W);
             when others =>
                 if TRIG_STAGES > 1 and addr >= ADDR_SEQ_BASE and addr < ADDR_SEQ_BASE + TRIG_STAGES * SEQ_STRIDE then
                     seq_stage := (addr - ADDR_SEQ_BASE) / SEQ_STRIDE;

@@ -38,6 +38,7 @@ ADDR_TRIG_EXT = 0x00B4
 ADDR_NUM_SEGMENTS = 0x00B8
 ADDR_SEG_STATUS = 0x00BC
 ADDR_SEG_SEL = 0x00C0
+ADDR_SEG_START = 0x00C8
 ADDR_TIMESTAMP_W = 0x00C4
 ADDR_PROBE_MUX_W = 0x00D0
 ADDR_TRIG_DELAY = 0x00D4
@@ -46,6 +47,8 @@ ADDR_TRIG_HOLDOFF = 0x00DC
 ADDR_COMPARE_CAPS = 0x00E0
 ADDR_WIDE_SEL = 0x00E4
 ADDR_WIDE_DATA = 0x00F0
+ADDR_RLE_CTRL = 0x00A8
+ADDR_RLE_W = 0x00CC
 ADDR_DATA_BASE = 0x0100
 
 
@@ -76,6 +79,9 @@ STOR_QUAL = env_int("ELA_PARAM_STOR_QUAL", 0)
 SEL_ADDR = 0x00AC if PROBE_MUX_W else 0x00A0  # ADDR_PROBE_SEL / ADDR_CHAN_SEL
 WORDS_PER_SAMPLE = (SAMPLE_W + 31) // 32
 TS_WORDS = (TIMESTAMP_W + 31) // 32 if TIMESTAMP_W > 0 else 0
+RLE_W = env_int("ELA_PARAM_RLE_W", 0)
+# Words per entry in the timestamp DATA window, which also carries run counts.
+AUX_WORDS = ((TIMESTAMP_W or RLE_W) + 31) // 32
 ADDR_TS_DATA_BASE = ADDR_DATA_BASE + DEPTH * WORDS_PER_SAMPLE * 4
 
 
@@ -133,6 +139,12 @@ class ElaFunctionalCoverage:
             "rolling_rearm_history": 0,
             "randomized_value_capture": 0,
             "trigger_alignment": 0,
+            "rle": 0,
+            "rle_saturation": 0,
+            "rle_off": 0,
+            "rle_burst": 0,
+            "rle_prearm": 0,
+            "rle_segments": 0,
         }
 
     def hit(self, name: str) -> None:
@@ -257,8 +269,10 @@ class ElaDriver:
         await self.write(ADDR_TRIG_VALUE, value)
         await self.write(ADDR_TRIG_MASK, mask)
 
-    async def read_samples(self, count: int, *, base: int = ADDR_DATA_BASE) -> list[int]:
-        return [await self.read(base + i * 4) for i in range(count)]
+    async def read_samples(
+        self, count: int, *, base: int = ADDR_DATA_BASE, stride: int = 1
+    ) -> list[int]:
+        return [await self.read(base + i * 4 * stride) for i in range(count)]
 
 
 async def setup(dut, *, sample_period_ns: int = 10) -> ElaDriver:
@@ -1713,3 +1727,293 @@ async def trigger_out_pulses_once_with_trigger_delay(dut):
     assert await ela.wait_done() & 0x4
     assert len(high) == 1, f"trigger_out high on cycles {high}"
     await ela.write(ADDR_TRIG_DELAY, 0)
+
+
+# ---- Run-length capture (RLE_W > 0) ------------------------------------------
+
+RLE_TRIGGER = 0xF0  # never produced by _rle_stream, so it marks one run
+
+
+def _rle_stream(seed: int, runs: int, *, max_run: int = 6, trigger_at: int | None = None,
+                trigger_run: int = 3) -> list[int]:
+    """Per-clock probe values: ``runs`` runs of random values (0..0xEF) and
+    random lengths 1..max_run, adjacent runs different.  ``trigger_at`` puts
+    a run of RLE_TRIGGER at that run index."""
+    rng = random.Random(seed)
+    stream: list[int] = []
+    prev = None
+    for i in range(runs):
+        if i == trigger_at:
+            value, length = RLE_TRIGGER, trigger_run
+        else:
+            value = rng.randrange(0xF0)
+            while value == prev:
+                value = rng.randrange(0xF0)
+            length = rng.randint(1, max_run)
+        stream += [value] * length
+        prev = value
+    return stream
+
+
+async def _drive_stream(dut, stream: list[int], hold: int) -> None:
+    for value in stream:
+        dut.probe_in.value = value
+        await RisingEdge(dut.sample_clk)
+    dut.probe_in.value = hold
+
+
+async def _rle_entries(ela, count: int) -> tuple[list[int], list[int]]:
+    """Read ``count`` entries and their run counts through the DATA window."""
+    entries = [s & 0xFF for s in await ela.read_samples(count)]
+    ctrl = await ela.read(ADDR_RLE_CTRL)
+    await ela.write(ADDR_RLE_CTRL, ctrl | 0x2)
+    counts = await ela.read_samples(count, base=ADDR_TS_DATA_BASE, stride=AUX_WORDS)
+    await ela.write(ADDR_RLE_CTRL, ctrl & 0x1)
+    return entries, counts
+
+
+def _is_sublist(part: list[int], whole: list[int]) -> bool:
+    n = len(part)
+    return any(whole[i:i + n] == part for i in range(len(whole) - n + 1))
+
+
+def _check_rle_window(entries, counts, stream, *, pre: int, splits: tuple[int, ...] = ()):
+    """The entries expand to a contiguous stretch of the driven clocks.
+
+    A new entry has a new value unless the previous one saturated, it is the
+    trigger entry, or it is listed in ``splits`` (an arm inside the window)."""
+    rle_max = (1 << RLE_W) - 1
+    assert all(0 <= c <= rle_max for c in counts), counts
+    assert counts[-1] == 0, f"last entry must end the capture: {counts}"
+    expanded = [v for v, c in zip(entries, counts) for _ in range(c + 1)]
+    assert _is_sublist(expanded, stream), (entries, counts)
+    for i in range(1, len(entries)):
+        if entries[i] == entries[i - 1]:
+            assert counts[i - 1] == rle_max or i == pre or i in splits, (i, entries, counts)
+
+
+async def _rle_capture(ela, stream, *, pre: int, post: int, lead: int = 4):
+    """One capture (single segment) of ``stream`` triggered on RLE_TRIGGER."""
+    await ela.configure_value_capture(pre=pre, post=post, value=RLE_TRIGGER)
+    ela.dut.probe_in.value = 0
+    await ela.arm()
+    await _drive_stream(ela.dut, stream, hold=stream[-1])
+    assert await ela.wait_done(400) & 0x4
+    assert await ela.read(ADDR_CAPTURE_LEN) == pre + post + 1
+    entries, counts = await _rle_entries(ela, pre + post + 1)
+    return entries, counts, [0] * lead + stream
+
+
+@cocotb.test()
+async def rle_registers(dut):
+    """RLE_W reads the parameter; RLE_CTRL holds two bits; arm and reset
+    clear bit 1 only."""
+    ela = await setup(dut)
+    assert await ela.read(ADDR_RLE_W) == RLE_W
+    assert await ela.read(ADDR_RLE_CTRL) == 0
+    await ela.write(ADDR_RLE_CTRL, 0xFFFF_FFFF)
+    assert await ela.read(ADDR_RLE_CTRL) == 0x3
+    await ela.write(ADDR_CTRL, 0x2)
+    assert await ela.read(ADDR_RLE_CTRL) == 0x1
+    await ela.write(ADDR_RLE_CTRL, 0x3)
+    await ela.arm()
+    assert await ela.read(ADDR_RLE_CTRL) == 0x1
+    FUNCTIONAL_COVERAGE.hit("rle")
+
+
+@cocotb.test()
+async def rle_entries_expand_to_the_driven_clocks(dut):
+    """With RLE on, each entry is a run: the entries expand to the clocks the
+    probe drove, the trigger opens its own entry, and the last entry ends the
+    capture.  With timestamps, each entry starts count + 1 clocks after the
+    previous one."""
+    if NUM_SEGMENTS > 1:
+        return  # one capture of one segment
+    ela = await setup(dut)
+    await ela.write(ADDR_RLE_CTRL, 1)
+    for seed in range(6):
+        await ela.reset_core()
+        pre, post = 3 + seed % 3, 4 + seed % 2
+        stream = _rle_stream(seed, 40, trigger_at=12)
+        entries, counts, clocks = await _rle_capture(ela, stream, pre=pre, post=post)
+        _check_rle_window(entries, counts, clocks, pre=pre)
+        assert entries[pre] == RLE_TRIGGER and entries[pre - 1] != RLE_TRIGGER
+        assert counts[pre] == 2, counts  # the 3-clock trigger run
+        if TIMESTAMP_W:
+            await ela.write(ADDR_RLE_CTRL, 1)
+            ts = await ela.read_samples(pre + post + 1, base=ADDR_TS_DATA_BASE,
+                                        stride=AUX_WORDS)
+            steps = [(ts[i + 1] - ts[i]) & 0xFFFF_FFFF for i in range(len(ts) - 1)]
+            assert steps == [c + 1 for c in counts[:-1]], (ts, counts)
+    FUNCTIONAL_COVERAGE.hit("rle")
+
+
+@cocotb.test()
+async def rle_changing_every_clock_then_holding(dut):
+    """A value that changes every clock stores one entry per clock, then a
+    hold extends the last one.  Under INPUT_PIPE the new entry's write and the
+    next clock's extend must land in order."""
+    if NUM_SEGMENTS > 1:
+        return  # one capture of one segment
+    ela = await setup(dut)
+    await ela.write(ADDR_RLE_CTRL, 1)
+    hold, held = 0x33, min(9, 1 << RLE_W)
+    stream = (list(range(1, 9)) + [RLE_TRIGGER] + list(range(0x40, 0x46)) + [hold] * held +
+              [0x50, 0x51])
+    entries, counts, clocks = await _rle_capture(ela, stream, pre=4, post=8)
+    _check_rle_window(entries, counts, clocks, pre=4)
+    assert entries == [5, 6, 7, 8, RLE_TRIGGER, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, hold, 0x50]
+    assert counts == [0] * 11 + [held - 1, 0], counts
+    FUNCTIONAL_COVERAGE.hit("rle")
+
+
+@cocotb.test()
+async def rle_trigger_delay_splits_the_run(dut):
+    """A trigger committed in the middle of a run (trigger delay) opens its
+    own entry, so the trigger sample's time stays exact."""
+    if NUM_SEGMENTS > 1:
+        return  # one capture of one segment
+    ela = await setup(dut)
+    await ela.write(ADDR_RLE_CTRL, 1)
+    await ela.write(ADDR_TRIG_DELAY, 2)
+    stream = [1, 2, 3, 4] + [RLE_TRIGGER] * 6 + [5, 6, 7]
+    entries, counts, clocks = await _rle_capture(ela, stream, pre=2, post=2)
+    await ela.write(ADDR_TRIG_DELAY, 0)
+    _check_rle_window(entries, counts, clocks, pre=2)
+    assert entries == [4, RLE_TRIGGER, RLE_TRIGGER, 5, 6], (entries, counts)
+    assert counts == [0, 1, 3, 0, 0], counts
+    FUNCTIONAL_COVERAGE.hit("rle")
+
+
+@cocotb.test()
+async def rle_count_saturates_into_a_new_entry(dut):
+    """A run longer than 2**RLE_W clocks continues in a new entry with the
+    same value."""
+    if RLE_W > 8 or NUM_SEGMENTS > 1:
+        return  # runs of 2**RLE_W clocks take too long to drive; one segment
+    ela = await setup(dut)
+    await ela.write(ADDR_RLE_CTRL, 1)
+    run = 1 << RLE_W
+    stream = [1, 2, 3] + [7] * (2 * run + 3) + [RLE_TRIGGER] * 2 + [9] * (run + 1) + [10, 11]
+    entries, counts, clocks = await _rle_capture(ela, stream, pre=3, post=3)
+    _check_rle_window(entries, counts, clocks, pre=3)
+    assert entries == [7, 7, 7, RLE_TRIGGER, 9, 9, 10], (entries, counts)
+    assert counts == [run - 1, run - 1, 2, 1, run - 1, 0, 0], counts
+    FUNCTIONAL_COVERAGE.hit("rle_saturation")
+
+
+@cocotb.test()
+async def rle_off_stores_every_clock(dut):
+    """An RLE core with RLE_CTRL[0] clear, or with decimation on, stores one
+    entry per stored sample and every count reads 0."""
+    if NUM_SEGMENTS > 1:
+        return  # one capture of one segment
+    ela = await setup(dut)
+    stream = [5] * 6 + [RLE_TRIGGER] + [6] * 6
+    for rle_ctrl, decim in ((0, 0), (1, 1)):
+        if decim and not DECIM_EN:
+            continue
+        await ela.reset_core()
+        await ela.write(ADDR_RLE_CTRL, rle_ctrl)
+        await ela.write(ADDR_DECIM, decim)
+        await ela.configure_value_capture(pre=2, post=2, value=RLE_TRIGGER)
+        await ela.arm()
+        await _drive_stream(dut, stream, hold=6)
+        assert await ela.wait_done() & 0x4
+        entries, counts = await _rle_entries(ela, 5)
+        assert counts == [0] * 5, (rle_ctrl, decim, counts)
+        assert entries == [5, 5, RLE_TRIGGER, 6, 6], (rle_ctrl, decim, entries)
+    await ela.write(ADDR_DECIM, 0)
+    FUNCTIONAL_COVERAGE.hit("rle_off")
+
+
+@cocotb.test()
+async def rle_counts_burst_on_the_timestamp_lane(dut):
+    """BURST_PTR[31:30] = 3 puts the run counts on the burst timestamp lane;
+    bit 31 alone keeps timestamps."""
+    if NUM_SEGMENTS > 1:
+        return  # one capture of one segment
+    ela = await setup(dut)
+    await ela.write(ADDR_RLE_CTRL, 1)
+    stream = [1] * 3 + [2] * 5 + [RLE_TRIGGER] * 4 + [3] * 2 + [4, 5]
+    entries, counts, _ = await _rle_capture(ela, stream, pre=2, post=2)
+    start = await ela.read(ADDR_SEG_START)
+
+    async def burst_lane(ptr_word: int) -> list[int]:
+        await ela.write(ADDR_BURST_PTR, ptr_word)
+        dut.burst_rd_active.value = 1
+        lane = []
+        for i in range(5):
+            dut.burst_rd_addr.value = (start + i) % DEPTH
+            await ela.wait_jtag(2)
+            lane.append(int(dut.burst_rd_ts_data.value))
+        dut.burst_rd_active.value = 0
+        return lane
+
+    assert entries == [1, 2, RLE_TRIGGER, 3, 4], entries
+    assert await burst_lane(0xC000_0000) == counts == [2, 4, 3, 1, 0]
+    if TIMESTAMP_W:
+        ts = await burst_lane(0x8000_0000)
+        assert [ts[i + 1] - ts[i] for i in range(4)] == [c + 1 for c in counts[:-1]], ts
+    FUNCTIONAL_COVERAGE.hit("rle_burst")
+
+
+@cocotb.test()
+async def rle_prearm_history_is_entries(dut):
+    """After a soft reset the idle ring stores entries too, so an early
+    trigger takes its pre-trigger window from that history.  The arm splits
+    the run held across it into two entries."""
+    if NUM_SEGMENTS > 1 or RLE_W < 8:
+        return  # no pre-arm history with segments; the held run must not saturate
+    ela = await setup(dut)
+    await ela.write(ADDR_RLE_CTRL, 1)
+    await ela.configure_value_capture(pre=5, post=2, value=RLE_TRIGGER)
+    await ela.arm()          # takes RLE on (this arm voids the history)
+    await ela.reset_core()   # back to idle, RLE still on
+    history = _rle_stream(11, 14)
+    runs: list[list[int]] = []
+    for value in history:
+        if runs and runs[-1][0] == value:
+            runs[-1][1] += 1
+        else:
+            runs.append([value, 1])
+    held = history[-1]
+    await _drive_stream(dut, history, hold=held)
+    await ela.write(ADDR_CTRL, 0x1)
+    await ela.wait_armed()
+    await _drive_stream(dut, [held] * 3 + [RLE_TRIGGER] * 2 + [0xE1] * 2 + [0xE2, 0xE3],
+                        hold=0xE3)
+    assert await ela.wait_done(400) & 0x4
+    entries, counts = await _rle_entries(ela, 8)
+    assert entries[3:6] == [held, held, RLE_TRIGGER], (entries, counts)
+    assert [[v, c + 1] for v, c in zip(entries[:3], counts[:3])] == runs[-4:-1], (
+        entries, counts, runs)
+    assert counts[5:] == [1, 1, 0], counts
+    FUNCTIONAL_COVERAGE.hit("rle_prearm")
+
+
+@cocotb.test()
+async def rle_segments_start_new_entries(dut):
+    """Each segment's window is runs of that segment only: its first entry
+    is new even when the value held across the segment boundary."""
+    if NUM_SEGMENTS < 2:
+        return
+    ela = await setup(dut)
+    await ela.write(ADDR_RLE_CTRL, 1)
+    pre, post = 1, 2
+    stream: list[int] = []
+    for seg in range(NUM_SEGMENTS):
+        stream += _rle_stream(20 + seg, 6, max_run=4, trigger_at=3)
+    await ela.configure_value_capture(pre=pre, post=post, value=RLE_TRIGGER)
+    dut.probe_in.value = 0
+    await ela.arm()
+    await _drive_stream(dut, stream, hold=stream[-1])
+    assert await ela.wait_done(800) & 0x4
+    clocks = [0] * 4 + stream
+    for seg in range(NUM_SEGMENTS):
+        await ela.write(ADDR_SEG_SEL, seg)
+        entries, counts = await _rle_entries(ela, pre + post + 1)
+        _check_rle_window(entries, counts, clocks, pre=pre)
+        assert entries[pre] == RLE_TRIGGER, (seg, entries)
+    await ela.write(ADDR_SEG_SEL, 0)
+    FUNCTIONAL_COVERAGE.hit("rle_segments")

@@ -21,6 +21,7 @@
 //   TIMESTAMP_W  - timestamp counter width (0 = disabled, 32 or 48 = enabled)
 //   NUM_SEGMENTS - number of capture segments (1 = single capture, >1 = segmented)
 //   REL_COMPARE  - 1 enables relational trigger modes (<, >, <=, >=)
+//   RLE_W        - run-length capture count width (0 = off, 1..16)
 //
 // When NUM_CHANNELS=1, probe_in width is unchanged (backward compatible).
 // All optional features are gated by parameters. The smallest core uses:
@@ -45,6 +46,7 @@ module fcapz_ela #(
     parameter REL_COMPARE = 0,      // 0=small/faster trigger, 1=enable < > <= >=
     parameter DUAL_COMPARE = 1,     // 0=A-only trigger compare, 1=enable comparator B
     parameter USER1_DATA_EN = 1,    // 0=disable slow USER1 DATA window readback
+    parameter RLE_W = 0,            // 0=no run-length capture, 1..16=run-count width
     parameter WIDE_TRIG = 0         // 0=trigger A value/mask are the low 32 bits only
                                     // (upper bits masked to 0); 1=make comparator A
                                     // programmable across the full SAMPLE_W via the
@@ -71,7 +73,8 @@ module fcapz_ela #(
     input  wire                      burst_rd_active,
     input  wire [$clog2(DEPTH)-1:0] burst_rd_addr,
     output wire [SAMPLE_W-1:0]      burst_rd_data,
-    output wire [((TIMESTAMP_W > 0) ? TIMESTAMP_W : 1)-1:0] burst_rd_ts_data,
+    // Timestamps, or run counts when the burst asks for them (BURST_PTR[30]).
+    output wire [((TIMESTAMP_W > 0) ? TIMESTAMP_W : (RLE_W > 0) ? RLE_W : 1)-1:0] burst_rd_ts_data,
     output reg                       burst_start,
     output reg                       burst_timestamp,
     output reg  [$clog2(DEPTH)-1:0]  burst_start_ptr
@@ -133,6 +136,10 @@ module fcapz_ela #(
     // {word index, value-or-mask}, then WIDE_DATA to load that 32-bit word.
     localparam ADDR_WIDE_SEL    = 16'h00E4;  // RW: [0]=mask(1)/value(0), [7:4]=word
     localparam ADDR_WIDE_DATA   = 16'h00F0;  // WO: 32-bit word -> selected slot
+    // Run-length capture (RLE_W > 0).  RLE_CTRL[0] enables it (taken on
+    // arm); RLE_CTRL[1] makes the timestamp DATA window return run counts.
+    localparam ADDR_RLE_CTRL    = 16'h00A8;  // RW
+    localparam ADDR_RLE_W       = 16'h00CC;  // RO: RLE_W (0 = no RLE)
 
     localparam ADDR_DATA_BASE   = 16'h0100;
     localparam [1:0] DEFAULT_TRIG_EXT_MODE = DEFAULT_TRIG_EXT[1:0];
@@ -151,12 +158,23 @@ module fcapz_ela #(
             $error("fcapz_ela: SAMPLE_W must be <= 256 (got %0d)", SAMPLE_W);
         if (DEFAULT_TRIG_EXT < 0 || DEFAULT_TRIG_EXT > 3)
             $error("fcapz_ela: DEFAULT_TRIG_EXT must be 0-3 (got %0d)", DEFAULT_TRIG_EXT);
+        if (RLE_W < 0 || RLE_W > 16)
+            $error("fcapz_ela: RLE_W must be 0-16 (got %0d)", RLE_W);
+        if (TIMESTAMP_W > 0 && RLE_W > TIMESTAMP_W)
+            $error("fcapz_ela: RLE_W (%0d) must not exceed TIMESTAMP_W (%0d)",
+                   RLE_W, TIMESTAMP_W);
     end
 
     // Synthesis-safe upper-bound trap for SAMPLE_W
     generate
         if (SAMPLE_W > 256)
             SAMPLE_W_must_be_at_most_256 _sample_w_check_FAILED();
+        // Counts share the timestamp lane of a core that has one, so they
+        // must fit it.
+        if (RLE_W > 16)
+            RLE_W_must_be_at_most_16 _rle_w_check_FAILED();
+        if (TIMESTAMP_W > 0 && RLE_W > TIMESTAMP_W)
+            RLE_W_must_not_exceed_TIMESTAMP_W _rle_ts_w_check_FAILED();
     endgenerate
 
     localparam PTR_W = $clog2(DEPTH);
@@ -199,6 +217,13 @@ module fcapz_ela #(
     localparam HAS_CHANNEL_MUX = (NUM_CHANNELS > 1);
     localparam HAS_PROBE_MUX = (PROBE_MUX_W > 0);
     localparam TS_MUX_W = (TIMESTAMP_W > 0) ? TIMESTAMP_W : 1;
+    localparam HAS_RLE = (RLE_W > 0);
+    localparam RLE_DATA_W = HAS_RLE ? RLE_W : 1;
+    // Aux lane (timestamp burst lane and DATA window): timestamps, or run
+    // counts on a core without timestamps.
+    localparam AUX_W = (TIMESTAMP_W > 0) ? TIMESTAMP_W : RLE_W;
+    localparam HAS_AUX = (AUX_W > 0);
+    localparam AUX_DATA_W = HAS_AUX ? AUX_W : 1;
 
     // Phase 4: segment derived params
     localparam SEG_DEPTH = DEPTH / NUM_SEGMENTS;
@@ -221,6 +246,7 @@ module fcapz_ela #(
     // Timestamp words per entry
     localparam TS_WORDS = (TIMESTAMP_W > 0) ? ((TIMESTAMP_W + 31) / 32) : 0;
     localparam TS_WORDS_SAFE = (TIMESTAMP_W > 0) ? ((TIMESTAMP_W + 31) / 32) : 1;
+    localparam AUX_WORDS_SAFE = HAS_AUX ? ((AUX_W + 31) / 32) : 1;
 
     // Probe mux derived params
     localparam PROBE_MUX_SLICES = (PROBE_MUX_W > 0) ? (PROBE_MUX_W / SAMPLE_W) : 0;
@@ -352,6 +378,10 @@ module fcapz_ela #(
     // Probe mux: slice select register (jtag_clk domain)
     reg [7:0] jtag_probe_sel;
 
+    // Run-length capture: [0]=enable, [1]=DATA window reads counts
+    reg [1:0] jtag_rle_ctrl;
+    reg       burst_rle;      // this burst reads run counts
+
     // ---- CDC sync registers ------------------------------------------------
     reg arm_toggle_sync1, arm_toggle_sync2;
     reg reset_toggle_sync1, reset_toggle_sync2;
@@ -369,6 +399,7 @@ module fcapz_ela #(
     reg                startup_arm_sync1, startup_arm_sync2;
     reg [15:0]         trig_holdoff_sync1, trig_holdoff_sync2;
     reg [15:0]         trig_delay_sync1,   trig_delay_sync2;
+    reg                rle_en_sync1,       rle_en_sync2;
     reg [3:0]          sq_mode_sync1, sq_mode_sync2;
     // SQ_MODE 0 turns qualification off; 1..9 select compare mode 0..8
     // (EQ..CHANGED).  Other values turn it off too.
@@ -576,7 +607,6 @@ module fcapz_ela #(
             assign ts_dout_b = {TS_DATA_W{1'b0}};
         end
     endgenerate
-    assign burst_rd_ts_data = ts_dout_b;
 
     // ---- Sequencer state (sample domain) -----------------------------------
     reg [SEQ_STATE_W-1:0] seq_state;
@@ -594,6 +624,12 @@ module fcapz_ela #(
 
     // ---- Storage qualification state (sample domain) -----------------------
     reg sq_enable;
+    // ---- Run-length capture state (sample domain) ---------------------------
+    reg                  rle_active;  // latched on arm
+    reg                  rle_open;    // the newest entry can still be extended
+    reg [SAMPLE_W-1:0]   rle_value;   // the newest entry's sample
+    reg [RLE_DATA_W-1:0] rle_count;   // its run length - 1
+    reg [PTR_W-1:0]      rle_addr;    // its address
     reg [3:0] sq_cmp_mode;
     reg [SAMPLE_W-1:0] sq_value, sq_mask;
 
@@ -643,8 +679,13 @@ module fcapz_ela #(
     // COMPARE_PIPE and qualification on, the sample right after the arm is
     // not stored and the rolling history gets a hole.
     wire arm_sq_bubble = (COMPARE_PIPE != 0) && sq_mode_on;
+    // Run-length capture is on only without decimation and qualification,
+    // so a count always means consecutive sample clocks.  Turning it on or
+    // off on an arm changes what the history entries mean.
+    wire rle_active_next = HAS_RLE && rle_en_sync2 && (decim_sync2 == 24'h0) && !sq_mode_on;
+    wire arm_rle_change = HAS_RLE && (rle_active_next != rle_active);
     // Arms after which the rolling pre-arm history cannot be trusted.
-    wire arm_voids_history = arm_sel_change || arm_sq_bubble;
+    wire arm_voids_history = arm_sel_change || arm_sq_bubble || arm_rle_change;
     reg                   sel_flush_active;
     reg [SEL_FLUSH_W-1:0] sel_flush_count;
     always @(posedge sample_clk or posedge sample_rst) begin
@@ -828,12 +869,18 @@ module fcapz_ela #(
     end
 
     // Phase 1: combined store enable (storage qualification AND decimation)
-    wire store_enable = store_sample & decim_tick & !sel_flush_active;
+    wire store_enable_base = store_sample & decim_tick & !sel_flush_active;
+    // Run-length capture: the sample the RAM would store, and whether it
+    // only extends the newest entry instead of opening a new one.
+    wire [SAMPLE_W-1:0] rle_sample = (PROBE_PIPE >= 1) ? probe_prev : active_probe;
+    wire rle_repeat = rle_active && rle_open && (rle_sample == rle_value) &&
+                      (rle_count != {RLE_DATA_W{1'b1}});
+    wire store_enable = store_enable_base & !rle_repeat;
 
     // ---- JTAG-domain register writes ---------------------------------------
     wire jtag_rd_data_window = HAS_USER1_DATA && (
         (jtag_addr >= ADDR_DATA_BASE) ||
-        (TIMESTAMP_W > 0 && {16'h0, jtag_addr} >= ADDR_TS_DATA_BASE));
+        (HAS_AUX && {16'h0, jtag_addr} >= ADDR_TS_DATA_BASE));
     assign datawin_req_now = jtag_rd_en && jtag_rd_data_window;
 
     wire [SEG_IDX_W-1:0] jtag_seg_sel_clamped =
@@ -850,7 +897,7 @@ module fcapz_ela #(
     endgenerate
 
     always @(*) begin
-        datawin_is_ts_comb = (TIMESTAMP_W > 0) && ({16'h0, jtag_addr} >= ADDR_TS_DATA_BASE);
+        datawin_is_ts_comb = HAS_AUX && ({16'h0, jtag_addr} >= ADDR_TS_DATA_BASE);
         datawin_oob_comb = 1'b0;
         datawin_mem_addr_comb = {PTR_W{1'b0}};
         datawin_chunk_comb = 32'h0;
@@ -861,8 +908,8 @@ module fcapz_ela #(
 
         if (datawin_is_ts_comb) begin
             datawin_word_index_comb = (jtag_addr - ADDR_TS_DATA_BASE[15:0]) >> 2;
-            datawin_sample_index_comb = datawin_word_index_comb / TS_WORDS_SAFE;
-            datawin_chunk_comb = datawin_word_index_comb % TS_WORDS_SAFE;
+            datawin_sample_index_comb = datawin_word_index_comb / AUX_WORDS_SAFE;
+            datawin_chunk_comb = datawin_word_index_comb % AUX_WORDS_SAFE;
         end else begin
             datawin_word_index_comb = (jtag_addr - ADDR_DATA_BASE) >> 2;
             datawin_sample_index_comb = datawin_word_index_comb / WORDS_PER_SAMPLE;
@@ -903,6 +950,8 @@ module fcapz_ela #(
             jtag_trig_ext      <= DEFAULT_TRIG_EXT_MODE;
             jtag_seg_sel       <= {SEG_IDX_W{1'b0}};
             jtag_probe_sel     <= 8'h0;
+            jtag_rle_ctrl      <= 2'b00;
+            burst_rle          <= 1'b0;
             jtag_startup_arm   <= (STARTUP_ARM != 0);
             jtag_trig_holdoff  <= 16'h0;
             jtag_trig_delay    <= 16'h0;
@@ -933,6 +982,8 @@ module fcapz_ela #(
                         jtag_ctrl <= jtag_wdata;
                         if (jtag_wdata[0]) arm_toggle_jtag <= ~arm_toggle_jtag;
                         if (jtag_wdata[1]) reset_toggle_jtag <= ~reset_toggle_jtag;
+                        // Arm and reset return the DATA window to timestamps.
+                        if (jtag_wdata[0] || jtag_wdata[1]) jtag_rle_ctrl[1] <= 1'b0;
                     end
                     ADDR_PRETRIG:    jtag_pretrig_len  <= jtag_wdata;
                     ADDR_POSTTRIG:   jtag_posttrig_len <= jtag_wdata;
@@ -958,6 +1009,7 @@ module fcapz_ela #(
                     ADDR_DECIM:      if (HAS_DECIM) jtag_decim <= jtag_wdata[23:0];
                     ADDR_TRIG_EXT:   if (HAS_EXT_TRIG) jtag_trig_ext <= jtag_wdata[1:0];
                     ADDR_PROBE_SEL:  if (HAS_PROBE_MUX) jtag_probe_sel <= jtag_wdata[7:0];
+                    ADDR_RLE_CTRL:   if (HAS_RLE) jtag_rle_ctrl <= jtag_wdata[1:0];
                     ADDR_STARTUP_ARM: jtag_startup_arm <= jtag_wdata[0];
                     ADDR_TRIG_HOLDOFF: jtag_trig_holdoff <= jtag_wdata[15:0];
                     ADDR_TRIG_DELAY: jtag_trig_delay   <= jtag_wdata[15:0];
@@ -970,6 +1022,7 @@ module fcapz_ela #(
                             ? jtag_seg_start_ptr
                             : rb_start_ptr_jtag;
                         burst_timestamp <= jtag_wdata[31];
+                        burst_rle       <= HAS_RLE && jtag_wdata[31] && jtag_wdata[30];
                         burst_start     <= ~burst_start;
                     end
                     default: begin
@@ -1109,6 +1162,7 @@ module fcapz_ela #(
             startup_arm_sync1 <= (STARTUP_ARM != 0); startup_arm_sync2 <= (STARTUP_ARM != 0);
             trig_holdoff_sync1 <= 0; trig_holdoff_sync2 <= 0;
             trig_delay_sync1  <= 0; trig_delay_sync2  <= 0;
+            rle_en_sync1      <= 0; rle_en_sync2      <= 0;
             sq_mode_sync1     <= 0; sq_mode_sync2     <= 0;
             sq_value_sync1    <= 0; sq_value_sync2    <= 0;
             sq_mask_sync1     <= 0; sq_mask_sync2     <= 0;
@@ -1149,6 +1203,8 @@ module fcapz_ela #(
             trig_holdoff_sync2 <= trig_holdoff_sync1;
             trig_delay_sync1  <= jtag_trig_delay;
             trig_delay_sync2  <= trig_delay_sync1;
+            rle_en_sync1      <= HAS_RLE && jtag_rle_ctrl[0];
+            rle_en_sync2      <= rle_en_sync1;
             sq_mode_sync1     <= HAS_STOR_QUAL ? jtag_sq_mode[3:0] : 4'h0;
             sq_mode_sync2     <= HAS_STOR_QUAL ? sq_mode_sync1 : 4'h0;
             sq_value_sync1    <= HAS_STOR_QUAL ? jtag_sq_value_w : {SAMPLE_W{1'b0}};
@@ -1236,6 +1292,7 @@ module fcapz_ela #(
             sq_cmp_mode      <= 4'd0;
             sq_value         <= {SAMPLE_W{1'b0}};
             sq_mask          <= {SAMPLE_W{1'b0}};
+            rle_active       <= 1'b0;
             chan_sel         <= 8'h0;
             probe_sel        <= 8'h0;
             decim_ratio      <= 24'h0;
@@ -1281,6 +1338,7 @@ module fcapz_ela #(
             sq_cmp_mode      <= sq_mode_on ? sq_mode_sync2 - 4'd1 : 4'h0;
             sq_value         <= HAS_STOR_QUAL ? sq_value_sync2 : {SAMPLE_W{1'b0}};
             sq_mask          <= HAS_STOR_QUAL ? sq_mask_sync2 : {SAMPLE_W{1'b0}};
+            rle_active       <= rle_active_next;
             // Phase 1: decimation
             decim_ratio      <= HAS_DECIM ? decim_sync2 : 24'h0;
             // Phase 2: external trigger
@@ -1378,6 +1436,86 @@ module fcapz_ela #(
             end
         end
     end
+
+    // ---- Run-length capture: count RAM ------------------------------------
+    // A store opens an entry with count 0.  A repeat of the newest entry's
+    // sample in a cycle that would have stored extends it instead: the
+    // count goes up and is rewritten at the entry's address.  The count
+    // write is registered so a new entry and the next cycle's extend of it
+    // reach the RAM in order whatever PROBE_PIPE is.
+    wire rle_extend = rle_repeat && store_enable_base && !trigger_commit_now &&
+                      ((!done && !triggered) ||
+                       (armed && !done && triggered && !post_left_zero));
+    // This cycle completes the segment (or the capture); the next segment's
+    // first sample must open its own entry.
+    wire rle_seg_end = armed && !done && !capture_restart && triggered &&
+                       (post_left_zero || (store_enable && post_left_one));
+    reg                  rle_we_q;
+    reg [PTR_W-1:0]      rle_wr_addr_q;
+    reg [RLE_DATA_W-1:0] rle_wr_count_q;
+    wire [RLE_DATA_W-1:0] rle_dout_b;
+
+    always @(posedge sample_clk or posedge sample_rst) begin
+        if (sample_rst) begin
+            rle_open       <= 1'b0;
+            rle_value      <= {SAMPLE_W{1'b0}};
+            rle_count      <= {RLE_DATA_W{1'b0}};
+            rle_addr       <= {PTR_W{1'b0}};
+            rle_we_q       <= 1'b0;
+            rle_wr_addr_q  <= {PTR_W{1'b0}};
+            rle_wr_count_q <= {RLE_DATA_W{1'b0}};
+        end else begin
+            rle_we_q       <= HAS_RLE && (mem_we_a || rle_extend);
+            rle_wr_addr_q  <= mem_we_a ? wr_ptr : rle_addr;
+            rle_wr_count_q <= mem_we_a ? {RLE_DATA_W{1'b0}} : rle_count + 1'b1;
+            if (!HAS_RLE || capture_restart || sel_flush_active || rle_seg_end) begin
+                rle_open <= 1'b0;
+            end else if (mem_we_a) begin
+                rle_open  <= rle_active;
+                rle_value <= rle_sample;
+                rle_count <= {RLE_DATA_W{1'b0}};
+                rle_addr  <= wr_ptr;
+            end else if (rle_extend) begin
+                rle_count <= rle_count + 1'b1;
+            end
+        end
+    end
+
+    generate
+        if (HAS_RLE) begin : g_rle
+            dpram #(.WIDTH(RLE_DATA_W), .DEPTH(DEPTH)) u_rlebuf (
+                .clk_a  (sample_clk),
+                .we_a   (rle_we_q),
+                .addr_a (rle_wr_addr_q),
+                .din_a  (rle_wr_count_q),
+                .dout_a (),
+                .clk_b  (jtag_clk),
+                .addr_b (mem_addr_b),
+                .dout_b (rle_dout_b)
+            );
+        end else begin : g_no_rle
+            assign rle_dout_b = {RLE_DATA_W{1'b0}};
+        end
+    endgenerate
+
+    // Aux lane: timestamps, or run counts.
+    wire [AUX_DATA_W-1:0] aux_ts_b;
+    wire [AUX_DATA_W-1:0] aux_rle_b;
+    generate
+        if (TIMESTAMP_W > 0) begin : g_aux_ts
+            assign aux_ts_b = ts_dout_b;  // AUX_W == TIMESTAMP_W
+        end else begin : g_aux_no_ts
+            assign aux_ts_b = {AUX_DATA_W{1'b0}};
+        end
+        if (HAS_RLE && AUX_DATA_W > RLE_DATA_W) begin : g_aux_rle_pad
+            assign aux_rle_b = {{(AUX_DATA_W - RLE_DATA_W){1'b0}}, rle_dout_b};
+        end else if (HAS_RLE) begin : g_aux_rle
+            assign aux_rle_b = rle_dout_b;
+        end else begin : g_aux_no_rle
+            assign aux_rle_b = {AUX_DATA_W{1'b0}};
+        end
+    endgenerate
+    assign burst_rd_ts_data = burst_rle ? aux_rle_b : aux_ts_b;
 
     // Phase 2: trigger_out pulse
     always @(posedge sample_clk or posedge sample_rst) begin
@@ -1730,7 +1868,8 @@ module fcapz_ela #(
                 if (datawin_oob_q)
                     jtag_rdata <= 32'h0;
                 else if (datawin_is_ts_q)
-                    jtag_rdata <= ts_chunk_word(ts_dout_b, datawin_chunk_q);
+                    jtag_rdata <= aux_chunk_word(jtag_rle_ctrl[1] ? aux_rle_b : aux_ts_b,
+                                                 datawin_chunk_q);
                 else
                     jtag_rdata <= sample_chunk_word(mem_dout_b, datawin_chunk_q);
             end
@@ -1766,17 +1905,17 @@ module fcapz_ela #(
         end
     endfunction
 
-    function [31:0] ts_chunk_word;
-        input [TS_DATA_W-1:0] sample;
+    function [31:0] aux_chunk_word;
+        input [AUX_DATA_W-1:0] sample;
         input integer chunk;
         integer bit_i;
         integer bit_base;
         begin
-            ts_chunk_word = 32'h0;
+            aux_chunk_word = 32'h0;
             bit_base = chunk * 32;
             for (bit_i = 0; bit_i < 32; bit_i = bit_i + 1) begin
-                if (bit_base + bit_i < TS_DATA_W)
-                    ts_chunk_word[bit_i] = sample[bit_base + bit_i];
+                if (bit_base + bit_i < AUX_DATA_W)
+                    aux_chunk_word[bit_i] = sample[bit_base + bit_i];
             end
         end
     endfunction
@@ -1834,6 +1973,8 @@ module fcapz_ela #(
             ADDR_TIMESTAMP_W: jtag_rdata_mux = TIMESTAMP_W;
             ADDR_COMPARE_CAPS: jtag_rdata_mux = COMPARE_CAPS;
             ADDR_WIDE_SEL:    jtag_rdata_mux = HAS_WIDE_TRIG ? {24'h0, jtag_wide_sel} : 32'h0;
+            ADDR_RLE_CTRL:    jtag_rdata_mux = HAS_RLE ? {30'h0, jtag_rle_ctrl} : 32'h0;
+            ADDR_RLE_W:       jtag_rdata_mux = RLE_W;
 
             default: begin
                 if (seq_addr_hit) begin
