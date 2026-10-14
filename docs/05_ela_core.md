@@ -421,6 +421,58 @@ and the no-priming-scan protocol automatically.  If the transport does
 not implement that method the host falls back to the USER1 path, which
 is correct but significantly slower.
 
+<a id="run-length-capture"></a>
+## Run-length capture (`RLE_W > 0`)
+
+A slow or idle signal fills the buffer with copies of the same value.
+With `RLE_W > 0` the ELA can store a repeated sample once, together with
+how many sample clocks it held, so the same `DEPTH` covers far more time.
+`RLE_W=0` (the default) builds none of it.
+
+Build it in with the `RLE_W` parameter (1..16, the width of the run count).
+It adds a `DEPTH x RLE_W` count RAM beside the sample RAM. One entry covers
+up to `2^RLE_W` clocks; a longer run continues in the next entry. On a core
+with timestamps, `RLE_W` must not exceed `TIMESTAMP_W`.
+
+Turn it on per capture:
+
+```python
+from fcapz import CaptureConfig, expand_run_lengths
+
+cfg = CaptureConfig(pretrigger=64, posttrigger=256, trigger=trig, rle=True)
+analyzer.configure(cfg)
+analyzer.arm()
+result = analyzer.capture(timeout=5.0)
+print(result.run_lengths)            # clocks per stored entry
+samples = expand_run_lengths(result) # one sample per clock
+```
+
+```bash
+fcapz capture --rle --pretrigger 64 --posttrigger 256 ...
+```
+
+The GUI and web interface show a **Run-length capture** checkbox on cores
+that report `RLE_W`.
+
+What changes when it is on:
+
+- `pretrigger` and `posttrigger` count **entries**, not clocks. The trigger
+  sample always starts a new entry, so its time is exact.
+- `result.samples` holds the entries and `result.run_lengths` the clocks
+  each one covers. The capture ends on the clock its last entry starts, so
+  that entry reports 1.
+- VCD, the GUI preview and the web viewer place each entry at its start
+  clock. CSV adds a `run_length` column and JSON a `run_lengths` list.
+- Each segment starts with a new entry.
+- It cannot be combined with decimation or storage qualification. The host
+  refuses that config, and the core ignores the enable while either is on.
+
+Counts travel on the timestamp burst lane (`BURST_PTR[31:30]=2'b11`), so
+they read back as fast as timestamps. Builds without a burst reader read
+them through the USER1 timestamp window instead. Register details are in
+[`specs/register_map.md`](specs/register_map.md); the design is in
+[`specs/rle_capture.md`](specs/rle_capture.md).
+
 ## Multiple debug cores on one USER chain
 
 Multi-ELA designs use the same generic core manager as mixed ELA/EIO designs.
@@ -849,6 +901,7 @@ info = analyzer.probe()
 #   "compare_caps": 0xB01C3,
 #   "compare_modes": [0, 1, 6, 7, 8],
 #   "has_dual_compare": True,
+#   "rle_width": 0,          # RLE_W; 0 = no run-length capture
 # }
 ```
 

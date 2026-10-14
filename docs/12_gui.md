@@ -171,6 +171,7 @@ Top section — **trigger**:
 | **Trigger delay** spinner (0..65535) | `trigger_delay` |
 | **Decimation** spinner | `decimation` |
 | **Ext-trigger mode** dropdown | `ext_trigger_mode` |
+| **Run-length capture** checkbox (only on `RLE_W` cores) | `rle` |
 
 Middle section — **storage qualification**:
 

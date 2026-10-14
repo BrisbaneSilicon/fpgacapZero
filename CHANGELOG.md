@@ -9,6 +9,19 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Run-length capture (`RLE_W`).** A new ELA parameter (0 or 1..16, default 0)
+  adds a run-count RAM so one buffer entry holds a sample and how many sample
+  clocks it repeated, up to `2^RLE_W`. Idle or slow signals then cover far more
+  time in the same `DEPTH`. Turned on per capture with `CaptureConfig.rle`,
+  `fcapz capture --rle`, the RPC `rle` field, or a checkbox in the GUI and web
+  interface. Results gain `run_lengths`; VCD, the previews and the web viewer
+  place entries at their start clocks, and `expand_run_lengths()` restores one
+  sample per clock. Pre/post-trigger windows count entries. Counts read back on
+  the timestamp burst lane (`BURST_PTR[31:30]=2'b11`) or the USER1 timestamp
+  window. New registers `RLE_CTRL` (0x00A8) and `RLE_W` (0x00CC). Both HDLs and
+  all standalone ELA wrappers; `RLE_W=0` builds and behaves exactly as before.
+  Not combinable with decimation or storage qualification.
+
 - **Vendor-neutral AXI4 interconnect.** A new generated `fcapz_axi_interconnect`
   (`rtl/`, a 2×1 full-AXI4 crossbar) merges a soft CPU and the EJTAG-AXI bridge
   onto one monitored bus as portable RTL, shared by both VexRiscv variants below

@@ -1,6 +1,7 @@
 # Run-length encoded capture (`RLE_W`)
 
-Status: design note. Not built yet.
+Status: built in both HDLs and the host stack. User guide:
+[Run-length capture](../05_ela_core.md#run-length-capture).
 
 ## Goal
 
