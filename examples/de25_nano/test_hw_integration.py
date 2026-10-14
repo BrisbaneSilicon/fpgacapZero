@@ -793,6 +793,48 @@ class TestRunLengthCapture(unittest.TestCase):
             self.assertEqual(len(result.samples), 6)
             self._check_runs(result, 2, step=8, run=8)
 
+    def _check_window(self, result, pretrigger, post_lengths):
+        """Entries step by 8 and each pre-trigger run is whole (but the
+        oldest); the window from the trigger has ``post_lengths``."""
+        samples = [s & 0xFF for s in result.samples]
+        lengths = result.run_lengths
+        self.assertEqual(len(samples), pretrigger + len(post_lengths), (samples, lengths))
+        for i in range(1, len(samples)):
+            self.assertEqual((samples[i] - samples[i - 1]) & 0xFF, 8, samples)
+        self.assertTrue(1 <= lengths[0] <= 8, lengths)
+        self.assertEqual(lengths[1:pretrigger], [8] * (pretrigger - 1), lengths)
+        self.assertEqual(lengths[pretrigger:], post_lengths, lengths)
+        ts = result.timestamps
+        for i in range(len(ts) - 1):
+            self.assertEqual(ts[i + 1] - ts[i], lengths[i], (ts, lengths))
+
+    def _capture_all_segments(self, cfg):
+        self.a.configure(cfg)
+        self.a.arm()
+        self.assertTrue(self.a.wait_all_segments_done(timeout=10.0))
+        return [self.a.capture_segment(seg, timeout=5.0) for seg in range(4)]
+
+    def test_clock_limit_ends_the_window(self):
+        # The trigger is clock 0 and the first clock of a run, so clocks
+        # 0..20 are two whole runs and 5 clocks of a third, long before 100
+        # post-trigger entries.  Each segment reports its own length.
+        cfg = self._config(pretrigger=4, posttrigger=100, post_clocks=20)
+        for result in self._capture_all_segments(cfg):
+            self._check_window(result, 4, [8, 8, 5])
+        self.assertEqual(self.a.transport.read_reg(0x0090), 20)
+
+    def test_entry_limit_wins_over_a_later_clock_limit(self):
+        cfg = self._config(pretrigger=4, posttrigger=2, post_clocks=200)
+        for result in self._capture_all_segments(cfg):
+            self._check_window(result, 4, [8, 8, 1])
+
+    def test_clock_limit_needs_rle(self):
+        with self.assertRaisesRegex(ValueError, "needs run-length"):
+            self.a.configure(self._config(rle=False, post_clocks=20))
+        # A plain capture clears the limit.
+        self._capture(self._config(rle=False))
+        self.assertEqual(self.a.transport.read_reg(0x0090), 0)
+
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
 class TestSegmentedCapture(unittest.TestCase):

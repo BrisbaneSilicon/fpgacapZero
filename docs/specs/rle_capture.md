@@ -171,7 +171,7 @@ Counts travel on the timestamp lane, so no new burst format exists.
 - Verilator lint, static parity, hardware run on a board build with
   `RLE_W=16`: the DE25-Nano reference design (both variants) runs
   `TestRunLengthCapture` on a second ELA channel that holds each value for
-  8 clocks.
+  8 clocks, including the clock limit read back from all four segments.
 - A value-match trigger on a held value can fire after the run's first
   clock (on the first clock the pre-trigger window is full). The trigger
   still opens a new entry, so that run shows up as two entries. The
