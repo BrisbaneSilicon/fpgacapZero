@@ -187,6 +187,9 @@ architecture rtl of fcapz_ela is
     -- in rtl/fcapz_ela.v.
     constant SEL_FLUSH_LEN    : positive := PROBE_PIPE + bool_to_nat(PROBE_PIPE > 0) + 1;
     constant HAS_RLE          : boolean := RLE_W > 0;
+    -- A clock limit can end a segment short, so segmented RLE builds keep
+    -- each segment's entry count for CAPTURE_LEN.
+    constant HAS_RLE_SEG_LEN  : boolean := HAS_RLE and NUM_SEGMENTS > 1;
     constant RLE_DATA_W       : positive := fcapz_nonzero_width(RLE_W);
     constant RLE_COUNT_MAX    : unsigned(RLE_DATA_W - 1 downto 0) := (others => '1');
     -- Aux lane (timestamp burst lane and DATA window): timestamps, or run
@@ -194,6 +197,13 @@ architecture rtl of fcapz_ela is
     constant AUX_W            : natural := fcapz_ela_aux_w(TIMESTAMP_W, RLE_W);
     constant AUX_DATA_W       : positive := fcapz_nonzero_width(AUX_W);
     constant AUX_WORDS        : natural := (AUX_W + 31) / 32;
+    -- RLE_POST_CLKS width: the most clocks a post-trigger window of entries
+    -- can span ((DEPTH - 1) * 2^RLE_W < 2^(LEN_W + RLE_W)), capped at 32.
+    -- Mirrors POST_CLK_W in rtl/fcapz_ela.v.
+    constant POST_CLK_W       : positive :=
+        bool_to_nat(not HAS_RLE) +
+        bool_to_nat(HAS_RLE and LEN_W + RLE_W > 32) * 32 +
+        bool_to_nat(HAS_RLE and LEN_W + RLE_W <= 32) * (LEN_W + RLE_W);
 
     constant ADDR_VERSION      : natural := 16#0000#;
     constant ADDR_CTRL         : natural := 16#0004#;
@@ -234,6 +244,9 @@ architecture rtl of fcapz_ela is
     -- arm); RLE_CTRL[1] makes the timestamp DATA window return run counts.
     constant ADDR_RLE_CTRL     : natural := 16#00A8#;  -- RW
     constant ADDR_RLE_W        : natural := 16#00CC#;  -- RO: RLE_W (0 = no RLE)
+    -- RLE only: also end the post-trigger window this many sample clocks
+    -- after the trigger commit (0 = entries only).  Taken on arm.
+    constant ADDR_RLE_POST_CLKS : natural := 16#0090#;  -- RW
     constant ADDR_DATA_BASE    : natural := 16#0100#;
 
     -- Full-width comparator A programmability (mirrors the Verilog WIDE_TRIG).
@@ -251,6 +264,7 @@ architecture rtl of fcapz_ela is
         std_logic_vector(to_unsigned(TRIG_STAGES, 4));
 
     type seg_ptr_t is array (0 to NUM_SEGMENTS - 1) of natural range 0 to DEPTH - 1;
+    type seg_len_t is array (0 to NUM_SEGMENTS - 1) of unsigned(PTR_W downto 0);
     type reg32_array_t is array (natural range <>) of std_logic_vector(31 downto 0);
     type sample_array_t is array (natural range <>) of std_logic_vector(SAMPLE_W - 1 downto 0);
     type seq_mode_array_t is array (natural range <>) of std_logic_vector(3 downto 0);
@@ -394,6 +408,20 @@ architecture rtl of fcapz_ela is
     signal post_left_zero    : std_logic := '1';
     signal post_left_one     : std_logic := '0';
     signal capture_len       : unsigned(PTR_W downto 0) := (others => '0');
+    -- RLE clock limit on the post-trigger window, latched on arm.  The
+    -- trigger commit is clock 0; post_clk_left counts the clocks still
+    -- allowed after it, and post_clk_last is registered
+    -- (post_clk_left = 1), so the stop starts at a flop.
+    signal rle_post_clks     : unsigned(POST_CLK_W - 1 downto 0) := (others => '0');
+    signal post_clk_en       : std_logic := '0';  -- RLE on and a limit set
+    signal post_clk_one      : std_logic := '0';  -- the limit is 1
+    signal post_clk_left     : unsigned(POST_CLK_W - 1 downto 0) := (others => '0');
+    signal post_clk_last     : std_logic := '0';
+    signal clk_stop_now      : std_logic := '0';
+    signal post_done_now     : std_logic := '0';
+    signal capture_len_done  : unsigned(PTR_W downto 0) := (others => '0');
+    -- Entries in each completed segment (HAS_RLE_SEG_LEN only).
+    signal seg_len           : seg_len_t := (others => (others => '0'));
     signal probe_prev        : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
     signal decim_count       : unsigned(23 downto 0) := (others => '0');
     signal timestamp_counter : unsigned(TS_WIDTH - 1 downto 0) := (others => '0');
@@ -429,6 +457,9 @@ architecture rtl of fcapz_ela is
     -- Run-length capture: [0]=enable, [1]=DATA window reads counts
     signal jtag_rle_ctrl     : std_logic_vector(1 downto 0) := "00";
     signal burst_rle         : std_logic := '0';  -- this burst reads run counts
+    signal jtag_rle_post_clks : std_logic_vector(POST_CLK_W - 1 downto 0) := (others => '0');  -- 0 = no clock limit
+    signal rle_post_clks_sync1 : unsigned(POST_CLK_W - 1 downto 0) := (others => '0');
+    signal rle_post_clks_sync2 : unsigned(POST_CLK_W - 1 downto 0) := (others => '0');
     signal rle_en_sync1      : std_logic := '0';
     signal rle_en_sync2      : std_logic := '0';
     signal rle_active_next   : std_logic := '0';
@@ -484,6 +515,7 @@ architecture rtl of fcapz_ela is
     signal rb_capture_len_sample  : unsigned(PTR_W downto 0) := (others => '0');
     signal rb_start_ptr_sample    : natural range 0 to DEPTH - 1 := 0;
     signal rb_seg_start_ptr_sample : seg_ptr_t := (others => 0);
+    signal rb_seg_len_sample      : seg_len_t := (others => (others => '0'));
     signal rb_meta_toggle_sync1   : std_logic := '0';
     signal rb_meta_toggle_sync2   : std_logic := '0';
     signal rb_meta_toggle_sync3   : std_logic := '0';
@@ -498,6 +530,10 @@ architecture rtl of fcapz_ela is
     signal rb_capture_len_jtag    : unsigned(PTR_W downto 0) := (others => '0');
     signal rb_start_ptr_jtag      : natural range 0 to DEPTH - 1 := 0;
     signal rb_seg_start_ptr_jtag  : seg_ptr_t := (others => 0);
+    signal rb_seg_len_jtag        : seg_len_t := (others => (others => '0'));
+    -- Entries the DATA window and CAPTURE_LEN cover: on segmented RLE builds
+    -- the selected segment's, since a clock limit can end segments short.
+    signal rb_window_len_jtag     : unsigned(PTR_W downto 0) := (others => '0');
     signal rb_done_jtag           : std_logic := '0';
     signal rb_meta_sample_busy    : std_logic := '0';
     signal rb_meta_event_sample   : std_logic := '0';
@@ -804,10 +840,20 @@ begin
                            ((done = '0' and triggered = '0') or
                             (armed = '1' and done = '0' and triggered = '1' and post_left_zero = '0'))
                   else '0';
+    -- RLE clock limit: this clock is the last the post-trigger window covers.
+    clk_stop_now <= '1' when HAS_RLE and post_clk_en = '1' and post_clk_last = '1' else '0';
+    -- The post-trigger window (segment or capture) completes on this clock.
+    post_done_now <= '1' when post_left_zero = '1' or (comb_store_ok = '1' and post_left_one = '1') or
+                              clk_stop_now = '1' else '0';
+    -- Entries in the window when it completes.  A clock stop ends it short:
+    -- post_left entries are still missing, less this clock's if it opens one.
+    capture_len_done <= capture_len when clk_stop_now = '0' else
+                        capture_len - resize(post_left, PTR_W + 1) +
+                        unsigned'(0 => comb_store_ok and not post_left_zero);
     -- This cycle completes the segment (or the capture); the next segment's
     -- first sample must open its own entry.
     rle_seg_end <= '1' when armed = '1' and done = '0' and capture_restart = '0' and triggered = '1' and
-                            (post_left_zero = '1' or (comb_store_ok = '1' and post_left_one = '1'))
+                            post_done_now = '1'
                    else '0';
 
     p_rle : process(sample_clk, sample_rst)
@@ -1143,6 +1189,9 @@ begin
             trig_value_b <= (others => '0');
             trig_mask_b <= (others => '1');
             rle_active <= '0';
+            rle_post_clks <= (others => '0');
+            post_clk_en <= '0';
+            post_clk_one <= '0';
             chan_sel <= 0;
             probe_sel <= 0;
             decim_ratio <= (others => '0');
@@ -1205,6 +1254,9 @@ begin
                     trig_mask_b <= (others => '1');
                 end if;
                 rle_active <= rle_active_next;
+                rle_post_clks <= rle_post_clks_sync2;
+                post_clk_en <= rle_active_next and bool_to_sl(rle_post_clks_sync2 /= 0);
+                post_clk_one <= bool_to_sl(rle_post_clks_sync2 = 1);
                 chan_sel <= chan_sel_next;
                 probe_sel <= probe_sel_next;
                 -- From the synchronisers, like every other field latched
@@ -1319,6 +1371,7 @@ begin
             burst_timestamp <= '0';
             burst_rle <= '0';
             jtag_rle_ctrl <= "00";
+            jtag_rle_post_clks <= (others => '0');
             burst_start_ptr_i <= (others => '0');
         elsif rising_edge(jtag_clk) then
             addr := to_integer(unsigned(jtag_addr));
@@ -1401,6 +1454,10 @@ begin
                     when ADDR_RLE_CTRL =>
                         if HAS_RLE then
                             jtag_rle_ctrl <= jtag_wdata(1 downto 0);
+                        end if;
+                    when ADDR_RLE_POST_CLKS =>
+                        if HAS_RLE then
+                            jtag_rle_post_clks <= jtag_wdata(POST_CLK_W - 1 downto 0);
                         end if;
                     when ADDR_STARTUP_ARM =>
                         jtag_startup_arm <= jtag_wdata(0);
@@ -1492,7 +1549,7 @@ begin
             datawin_chunk_comb <= word_index mod WORDS_PER_SAMPLE;
         end if;
 
-        if sample_index >= to_integer(rb_capture_len_jtag) then
+        if sample_index >= to_integer(rb_window_len_jtag) then
             datawin_oob_comb <= '1';
         else
             mem_addr_v := seg_base_v + ((start_ptr_v - seg_base_v + sample_index) mod SEG_DEPTH);
@@ -1514,6 +1571,7 @@ begin
             rb_capture_len_sample <= (others => '0');
             rb_start_ptr_sample <= 0;
             rb_seg_start_ptr_sample <= (others => 0);
+            rb_seg_len_sample <= (others => (others => '0'));
         elsif rising_edge(sample_clk) then
             rb_done_d <= done;
             rb_seg_count_d <= seg_count;
@@ -1530,11 +1588,18 @@ begin
                 rb_capture_len_sample <= capture_len;
                 rb_start_ptr_sample <= start_ptr;
                 rb_seg_start_ptr_sample <= seg_start_ptr;
+                if HAS_RLE_SEG_LEN then
+                    rb_seg_len_sample <= seg_len;
+                else
+                    rb_seg_len_sample <= (others => (others => '0'));
+                end if;
                 rb_meta_toggle_sample <= not rb_meta_toggle_sample;
                 rb_meta_pending_sample <= '0';
             end if;
         end if;
     end process;
+
+    rb_window_len_jtag <= rb_seg_len_jtag(jtag_seg_sel) when HAS_RLE_SEG_LEN else rb_capture_len_jtag;
 
     p_rb_meta_jtag : process(jtag_clk, jtag_rst)
     begin
@@ -1546,6 +1611,7 @@ begin
             rb_capture_len_jtag <= (others => '0');
             rb_start_ptr_jtag <= 0;
             rb_seg_start_ptr_jtag <= (others => 0);
+            rb_seg_len_jtag <= (others => (others => '0'));
             rb_done_jtag <= '0';
         elsif rising_edge(jtag_clk) then
             rb_meta_toggle_sync1 <= rb_meta_toggle_sample;
@@ -1558,6 +1624,7 @@ begin
                 rb_capture_len_jtag <= rb_capture_len_sample;
                 rb_start_ptr_jtag <= rb_start_ptr_sample;
                 rb_seg_start_ptr_jtag <= rb_seg_start_ptr_sample;
+                rb_seg_len_jtag <= rb_seg_len_sample;
                 rb_meta_ack_toggle_jtag <= rb_meta_toggle_sync2;
                 -- Done counts only for the latest ARM / reset (see
                 -- rtl/fcapz_ela.v).
@@ -1603,6 +1670,8 @@ begin
             trig_holdoff_sync2 <= (others => '0');
             rle_en_sync1 <= '0';
             rle_en_sync2 <= '0';
+            rle_post_clks_sync1 <= (others => '0');
+            rle_post_clks_sync2 <= (others => '0');
             sq_mode_sync1 <= (others => '0');
             sq_mode_sync2 <= (others => '0');
             sq_value_sync1 <= (others => '0');
@@ -1646,6 +1715,12 @@ begin
             trig_holdoff_sync2 <= trig_holdoff_sync1;
             rle_en_sync1 <= bool_to_sl(HAS_RLE) and jtag_rle_ctrl(0);
             rle_en_sync2 <= rle_en_sync1;
+            if HAS_RLE then
+                rle_post_clks_sync1 <= unsigned(jtag_rle_post_clks);
+            else
+                rle_post_clks_sync1 <= (others => '0');
+            end if;
+            rle_post_clks_sync2 <= rle_post_clks_sync1;
             sq_mode_sync1 <= jtag_sq_mode;
             sq_mode_sync2 <= sq_mode_sync1;
             sq_value_sync1 <= jtag_sq_value;
@@ -1709,6 +1784,9 @@ begin
             post_left_zero <= '1';
             post_left_one <= '0';
             capture_len <= (others => '0');
+            post_clk_left <= (others => '0');
+            post_clk_last <= '0';
+            seg_len <= (others => (others => '0'));
             probe_prev <= (others => '0');
             decim_count <= (others => '0');
             timestamp_counter <= (others => '0');
@@ -1820,6 +1898,7 @@ begin
                 all_seg_done <= '0';
                 segment_wrapped <= '0';
                 seg_start_ptr <= (others => 0);
+                seg_len <= (others => (others => '0'));
                 trig_delay_pending <= '0';
                 trig_delay_count <= (others => '0');
                 trig_holdoff_active <= '0';
@@ -2004,6 +2083,8 @@ begin
                         post_left <= posttrig_len;
                         post_left_zero <= bool_to_sl(posttrig_len = 0);
                         post_left_one <= bool_to_sl(posttrig_len = 1);
+                        post_clk_left <= rle_post_clks;
+                        post_clk_last <= post_clk_one;
                     end if;
 
                     if store_now then
@@ -2012,7 +2093,19 @@ begin
                 else
                     trig_delay_pending <= '0';
                     trig_delay_count <= (others => '0');
-                    if post_left_zero = '1' then
+                    -- Post-trigger countdown (counts stored samples only).
+                    -- With RLE a clock limit can end the window first.
+                    if store_ok and post_left_zero = '0' then
+                        if NUM_SEGMENTS > 1 then
+                            if wr_ptr = base + SEG_DEPTH - 1 then
+                                segment_wrapped <= '1';
+                            end if;
+                        end if;
+                        wr_ptr <= next_ptr(wr_ptr, base);
+                    end if;
+                    if post_done_now = '1' then
+                        -- Segment complete
+                        capture_len <= capture_len_done;
                         start_calc := capture_start_ptr(trig_ptr, to_integer(pretrig_len), to_integer(posttrig_len), base, segment_wrapped);
                         if NUM_SEGMENTS = 1 then
                             done <= '1';
@@ -2022,6 +2115,9 @@ begin
                             for seg_i in 0 to NUM_SEGMENTS - 1 loop
                                 if seg_i = cur_segment then
                                     seg_start_next(seg_i) := start_calc;
+                                    if HAS_RLE_SEG_LEN then
+                                        seg_len(seg_i) <= capture_len_done;
+                                    end if;
                                 else
                                     seg_start_next(seg_i) := seg_start_ptr(seg_i);
                                 end if;
@@ -2052,59 +2148,15 @@ begin
                                 seq_counter <= (others => '0');
                             end if;
                         end if;
-                    elsif store_ok then
-                        if NUM_SEGMENTS > 1 then
-                            if wr_ptr = base + SEG_DEPTH - 1 then
-                                segment_wrapped <= '1';
-                            end if;
-                        end if;
-                        if post_left_one = '1' then
-                            start_calc := capture_start_ptr(trig_ptr, to_integer(pretrig_len), to_integer(posttrig_len), base, segment_wrapped);
-                            if NUM_SEGMENTS = 1 then
-                                done <= '1';
-                                armed <= '0';
-                                start_ptr <= start_calc;
-                                wr_ptr <= next_ptr(wr_ptr, base);
-                            else
-                                for seg_i in 0 to NUM_SEGMENTS - 1 loop
-                                    if seg_i = cur_segment then
-                                        seg_start_next(seg_i) := start_calc;
-                                    else
-                                        seg_start_next(seg_i) := seg_start_ptr(seg_i);
-                                    end if;
-                                end loop;
-                                seg_start_ptr <= seg_start_next;
-                                if cur_segment = NUM_SEGMENTS - 1 then
-                                    done <= '1';
-                                    armed <= '0';
-                                    all_seg_done <= '1';
-                                    start_ptr <= seg_start_ptr(0);
-                                    seg_count <= NUM_SEGMENTS;
-                                    wr_ptr <= next_ptr(wr_ptr, base);
-                                else
-                                    next_segment := cur_segment + 1;
-                                    cur_segment <= next_segment;
-                                    seg_count <= seg_count + 1;
-                                    triggered <= '0';
-                                    pre_count <= (others => '0');
-                                    post_left <= (others => '0');
-                                    post_left_zero <= '1';
-                                    post_left_one <= '0';
-                                    wr_ptr <= seg_base(next_segment);
-                                    segment_wrapped <= '0';
-                                    trig_delay_pending <= '0';
-                                    trig_delay_count <= (others => '0');
-                                    trig_holdoff_active <= '1' when trig_holdoff > 0 else '0';
-                                    trig_holdoff_count <= trig_holdoff - 1 when trig_holdoff > 0 else (others => '0');
-                                    seq_state <= 0;
-                                    seq_counter <= (others => '0');
-                                end if;
-                            end if;
-                        else
+                    else
+                        if store_ok then
                             post_left <= post_left - 1;
                             post_left_zero <= '0';
                             post_left_one <= bool_to_sl(post_left = 2);
-                            wr_ptr <= next_ptr(wr_ptr, base);
+                        end if;
+                        if HAS_RLE then
+                            post_clk_left <= post_clk_left - 1;
+                            post_clk_last <= bool_to_sl(post_clk_left = 2);
                         end if;
                     end if;
                 end if;
@@ -2170,7 +2222,7 @@ begin
             when ADDR_DEPTH => r := u32(DEPTH);
             when ADDR_PRETRIG => r := jtag_pretrig_len;
             when ADDR_POSTTRIG => r := jtag_posttrig_len;
-            when ADDR_CAPTURE_LEN => r := u32(rb_capture_len_jtag);
+            when ADDR_CAPTURE_LEN => r := u32(rb_window_len_jtag);
             when ADDR_TRIG_MODE => r := jtag_trig_mode;
             when ADDR_TRIG_VALUE => r := jtag_trig_value;
             when ADDR_TRIG_MASK => r := jtag_trig_mask;
@@ -2220,6 +2272,11 @@ begin
                     r(1 downto 0) := jtag_rle_ctrl;
                 end if;
             when ADDR_RLE_W => r := u32(RLE_W);
+            when ADDR_RLE_POST_CLKS =>
+                r := (others => '0');
+                if HAS_RLE then
+                    r(POST_CLK_W - 1 downto 0) := jtag_rle_post_clks;
+                end if;
             when others =>
                 if TRIG_STAGES > 1 and addr >= ADDR_SEQ_BASE and addr < ADDR_SEQ_BASE + TRIG_STAGES * SEQ_STRIDE then
                     seq_stage := (addr - ADDR_SEQ_BASE) / SEQ_STRIDE;

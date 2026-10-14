@@ -49,6 +49,7 @@ ADDR_WIDE_SEL = 0x00E4
 ADDR_WIDE_DATA = 0x00F0
 ADDR_RLE_CTRL = 0x00A8
 ADDR_RLE_W = 0x00CC
+ADDR_RLE_POST_CLKS = 0x0090
 ADDR_DATA_BASE = 0x0100
 
 
@@ -145,6 +146,7 @@ class ElaFunctionalCoverage:
             "rle_burst": 0,
             "rle_prearm": 0,
             "rle_segments": 0,
+            "rle_post_clks": 0,
         }
 
     def hit(self, name: str) -> None:
@@ -1818,6 +1820,12 @@ async def rle_registers(dut):
     await ela.write(ADDR_RLE_CTRL, 0x3)
     await ela.arm()
     assert await ela.read(ADDR_RLE_CTRL) == 0x1
+    # RLE_POST_CLKS keeps min(32, LEN_W + RLE_W) bits.
+    post_clk_w = min(32, DEPTH.bit_length() + RLE_W)
+    assert await ela.read(ADDR_RLE_POST_CLKS) == 0
+    await ela.write(ADDR_RLE_POST_CLKS, 0xFFFF_FFFF)
+    assert await ela.read(ADDR_RLE_POST_CLKS) == (1 << post_clk_w) - 1
+    await ela.write(ADDR_RLE_POST_CLKS, 0)
     FUNCTIONAL_COVERAGE.hit("rle")
 
 
@@ -2017,3 +2025,149 @@ async def rle_segments_start_new_entries(dut):
         assert entries[pre] == RLE_TRIGGER, (seg, entries)
     await ela.write(ADDR_SEG_SEL, 0)
     FUNCTIONAL_COVERAGE.hit("rle_segments")
+
+
+# ---- Run-length capture: post-trigger clock limit (RLE_POST_CLKS) ----------
+
+def _runs(values: list[int]) -> list[list[int]]:
+    out: list[list[int]] = []
+    for v in values:
+        if out and out[-1][0] == v:
+            out[-1][1] += 1
+        else:
+            out.append([v, 1])
+    return out
+
+
+def _clock_limit_model(values: list[int], commit: int, *, pre: int, post: int,
+                       n: int) -> list[list[int]]:
+    """[value, count] entries of a capture of ``values`` (one per clock) whose
+    trigger commits at clock ``commit``: ``pre`` whole runs before it, then
+    entries until the ``post``-th post-trigger entry opens or clock ``n``
+    after the commit, whichever comes first (n = 0: no clock limit).  Runs
+    must stay below 2**RLE_W clocks."""
+    entries = [[v, c - 1] for v, c in _runs(values[:commit])][-pre:]
+    window: list[list[int]] = []
+    for clk, v in enumerate(values[commit:]):
+        if clk == 0 or v != window[-1][0]:
+            window.append([v, 0])
+            if len(window) - 1 == post:
+                break
+        else:
+            window[-1][1] += 1
+        if n and clk == n:
+            break
+    return entries + window
+
+
+async def _check_ts_steps(ela, counts: list[int]) -> None:
+    """With timestamps, each entry starts count + 1 clocks after the last."""
+    if not TIMESTAMP_W:
+        return
+    ts = await ela.read_samples(len(counts), base=ADDR_TS_DATA_BASE, stride=AUX_WORDS)
+    steps = [(ts[i + 1] - ts[i]) & 0xFFFF_FFFF for i in range(len(ts) - 1)]
+    assert steps == [c + 1 for c in counts[:-1]], (ts, counts)
+
+
+@cocotb.test()
+async def rle_clock_limit_ends_the_window(dut):
+    """RLE_POST_CLKS = N ends the post-trigger window on clock N after the
+    trigger commit (clock 0) when that comes before the posttrigger-th
+    entry.  CAPTURE_LEN reports the entries stored, and the last entry
+    keeps the clocks it got, also when the stop clock extends it."""
+    if NUM_SEGMENTS > 1:
+        return  # one capture of one segment
+    ela = await setup(dut)
+    await ela.write(ADDR_RLE_CTRL, 1)
+    pre, post = 2, 4
+    stream = ([0x11] * 2 + [0x12] * 3 + [RLE_TRIGGER] * 3 + [0x21] + [0x22] * 4 +
+              [0x23] * 2 + [0x24] + [0x25] * 3)
+    values = [0] * 4 + stream
+    # N: 1 and 2 stop inside the trigger run, 3 on a new entry, 6 inside a
+    # run, 10 with the entry limit on the same clock, 50 after it, 0 = off.
+    # Then a trigger delay of 1 moves clock 0 one clock into the run.
+    for n, delay in ((1, 0), (2, 0), (3, 0), (6, 0), (10, 0), (50, 0), (0, 0), (3, 1)):
+        await ela.write(ADDR_RLE_POST_CLKS, n)
+        await ela.write(ADDR_TRIG_DELAY, delay)
+        assert await ela.read(ADDR_RLE_POST_CLKS) == n
+        await ela.configure_value_capture(pre=pre, post=post, value=RLE_TRIGGER)
+        dut.probe_in.value = 0
+        await ela.arm()
+        await _drive_stream(dut, stream, hold=stream[-1])
+        assert await ela.wait_done(400) & 0x4
+        commit = values.index(RLE_TRIGGER) + delay
+        expect = _clock_limit_model(values, commit, pre=pre, post=post, n=n)
+        length = await ela.read(ADDR_CAPTURE_LEN)
+        assert length == len(expect), (n, delay, length, expect)
+        entries, counts = await _rle_entries(ela, length)
+        assert [[v, c] for v, c in zip(entries, counts)] == expect, (n, delay, entries, counts)
+        if n and length < pre + post + 1:
+            # The clock limit won: the window from the commit is N + 1 clocks.
+            assert sum(c + 1 for c in counts[pre:]) == n + 1, (n, counts)
+        await _check_ts_steps(ela, counts)
+    await ela.write(ADDR_RLE_POST_CLKS, 0)
+    await ela.write(ADDR_TRIG_DELAY, 0)
+    FUNCTIONAL_COVERAGE.hit("rle_post_clks")
+
+
+@cocotb.test()
+async def rle_clock_limit_needs_rle(dut):
+    """With RLE off the clock limit does nothing: every clock is an entry."""
+    if NUM_SEGMENTS > 1:
+        return
+    ela = await setup(dut)
+    await ela.write(ADDR_RLE_CTRL, 0)
+    await ela.write(ADDR_RLE_POST_CLKS, 2)
+    pre, post = 2, 6
+    stream = [1, 2, 3, RLE_TRIGGER] + [7] * 10
+    await ela.configure_value_capture(pre=pre, post=post, value=RLE_TRIGGER)
+    dut.probe_in.value = 0
+    await ela.arm()
+    await _drive_stream(dut, stream, hold=7)
+    assert await ela.wait_done(400) & 0x4
+    assert await ela.read(ADDR_CAPTURE_LEN) == pre + post + 1
+    samples = [s & 0xFF for s in await ela.read_samples(pre + post + 1)]
+    assert samples == [2, 3, RLE_TRIGGER] + [7] * post, samples
+    await ela.write(ADDR_RLE_POST_CLKS, 0)
+    FUNCTIONAL_COVERAGE.hit("rle_post_clks")
+
+
+@cocotb.test()
+async def rle_clock_limit_per_segment(dut):
+    """Each segment ends on its own limit, so segments hold different entry
+    counts; CAPTURE_LEN reports the one SEG_SEL selects."""
+    if NUM_SEGMENTS < 2:
+        return
+    ela = await setup(dut)
+    await ela.write(ADDR_RLE_CTRL, 1)
+    pre, post, n = 1, 3, 4
+    # The trigger run takes clocks 0-2.  Clock 3 opens the first post entry;
+    # clock 4 (the limit) opens the second one (4 entries) or extends the
+    # first (3).  The last segment is short, so the earlier, longer ones
+    # must not be cut to its length.
+    tails = ([[0x31], [0x32] * 3], [[0x61], [0x62]],
+             [[0x51] * 2, [0x52]], [[0x41] * 3, [0x42] * 2])
+    segs: list[list[int]] = []
+    for s in range(NUM_SEGMENTS):
+        a, b, c = 0x70 + s, 0x80 + s, 0x90 + s
+        tail = [v for run in tails[s % len(tails)] for v in run]
+        segs.append([a] * 2 + [b] * 2 + [RLE_TRIGGER] * 3 + tail + [c] * 2)
+    await ela.write(ADDR_RLE_POST_CLKS, n)
+    await ela.configure_value_capture(pre=pre, post=post, value=RLE_TRIGGER)
+    dut.probe_in.value = 0
+    await ela.arm()
+    await _drive_stream(dut, [v for seg in segs for v in seg], hold=0)
+    assert await ela.wait_done(800) & 0x4
+    lengths = []
+    for s, seg in enumerate(segs):
+        expect = _clock_limit_model(seg, seg.index(RLE_TRIGGER), pre=pre, post=post, n=n)
+        await ela.write(ADDR_SEG_SEL, s)
+        length = await ela.read(ADDR_CAPTURE_LEN)
+        assert length == len(expect), (s, length, expect)
+        entries, counts = await _rle_entries(ela, length)
+        assert [[v, c] for v, c in zip(entries, counts)] == expect, (s, entries, counts)
+        lengths.append(length)
+    assert len(set(lengths)) > 1, lengths
+    await ela.write(ADDR_SEG_SEL, 0)
+    await ela.write(ADDR_RLE_POST_CLKS, 0)
+    FUNCTIONAL_COVERAGE.hit("rle_post_clks")

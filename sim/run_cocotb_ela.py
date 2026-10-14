@@ -83,6 +83,8 @@ RLE_TESTS = (
     "rle_count_saturates_into_a_new_entry",
     "rle_off_stores_every_clock",
     "rle_counts_burst_on_the_timestamp_lane",
+    "rle_clock_limit_ends_the_window",
+    "rle_clock_limit_needs_rle",
 )
 
 TARGETS: tuple[CocotbTarget, ...] = (
@@ -221,7 +223,8 @@ TARGETS: tuple[CocotbTarget, ...] = (
                  RLE_TESTS + ("rle_prearm_history_is_entries",)),
     CocotbTarget("rle4_ts48_seg4", {"RLE_W": 4, "DEPTH": 64, "TIMESTAMP_W": 48,
                                     "NUM_SEGMENTS": 4},
-                 ("rle_registers", "rle_segments_start_new_entries")),
+                 ("rle_registers", "rle_segments_start_new_entries",
+                  "rle_clock_limit_per_segment")),
     CocotbTarget(
         "config_min",
         {"TRIG_STAGES": 1, "STOR_QUAL": 0, "DECIM_EN": 0, "EXT_TRIG_EN": 0, "DUAL_COMPARE": 0},
