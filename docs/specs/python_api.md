@@ -462,6 +462,27 @@ Comparator trigger: `mode` is `value_match`, `edge_detect` or `both`.
 | `value` | `int` | required |  |
 | `mask` | `int` | required |  |
 
+### `entry_start_clocks`
+
+```python
+entry_start_clocks(result: CaptureResult) -> list[int]
+```
+
+Sample clock, from the first entry, at which each entry starts.
+
+`0 .. n-1` when the capture is not run-length.
+
+### `expand_run_lengths`
+
+```python
+expand_run_lengths(result: CaptureResult, max_samples: int = 16777216) -> list[int]
+```
+
+One sample per sample clock: each entry repeated for its run length.
+
+Returns `result.samples` unchanged when the capture is not run-length.
+Raises `ValueError` when the expansion would exceed `max_samples`.
+
 ## `fcapz.transport`
 
 ### `Transport`
