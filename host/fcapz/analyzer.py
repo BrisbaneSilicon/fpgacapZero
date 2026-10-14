@@ -1254,7 +1254,8 @@ class Analyzer:
                 {"index": i, "value": v} for i, v in enumerate(result.timestamps)
             ]
         if result.run_lengths:
-            # Sample clocks per entry; the last entry is open-ended.
+            # Sample clocks per entry; the last one is cut where the capture
+            # ended (see CaptureResult.run_lengths).
             d["run_lengths"] = [
                 {"index": i, "value": v} for i, v in enumerate(result.run_lengths)
             ]
