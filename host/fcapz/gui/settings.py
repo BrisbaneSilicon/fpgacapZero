@@ -361,6 +361,7 @@ def trigger_history_entry_from_config(
         "stor_qual_mask": int(cfg.stor_qual_mask),
         "trigger_holdoff": int(cfg.trigger_holdoff),
         "trigger_delay": int(cfg.trigger_delay),
+        "rle": bool(cfg.rle),
         "probes": probes,
         "trigger_sequence": [
             {
