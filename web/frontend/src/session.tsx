@@ -43,6 +43,8 @@ export interface ElaConfig {
   useSequencer: boolean;
   sequenceJson: string;
   segmented: boolean;
+  /** Run-length capture: store a repeated sample once with its clock count. */
+  rle: boolean;
   probesText: string;
 }
 
@@ -60,6 +62,7 @@ export const DEFAULT_ELA: ElaConfig = {
   useSequencer: false,
   sequenceJson: "",
   segmented: false,
+  rle: false,
   probesText: "",
 };
 

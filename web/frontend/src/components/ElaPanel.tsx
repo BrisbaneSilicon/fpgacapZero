@@ -72,6 +72,21 @@ export function ElaPanel() {
           />
           Read all segments
         </label>
+        {Number(identity?.rle_width) > 0 ? (
+          <label
+            className="inline"
+            title={`Store a repeated sample once with how many clocks it held (up to ${
+              2 ** Number(identity?.rle_width)
+            }). The window then counts entries, not clocks.`}
+          >
+            <input
+              type="checkbox"
+              checked={ela.rle}
+              onChange={(e) => setEla({ rle: e.target.checked })}
+            />
+            Run-length capture
+          </label>
+        ) : null}
       </div>
       <input
         type="range"
