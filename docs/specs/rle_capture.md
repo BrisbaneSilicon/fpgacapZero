@@ -122,7 +122,7 @@ Counts travel on the timestamp lane, so no new burst format exists.
   with `RLE_W != 0`, and raises if `rle=True` on a core without it or with
   decimation or storage qualification set.
 - `CaptureResult` keeps `samples` as the stored entries and gains
-  `run_lengths` (clocks per entry, `None` when RLE is off). The trigger
+  `run_lengths` (clocks per entry, empty when RLE is off). The trigger
   index stays an entry index. A helper expands entries to one sample per
   clock, with a size limit.
 - VCD and the other exporters place each entry at its start clock, from the
@@ -142,4 +142,10 @@ Counts travel on the timestamp lane, so no new burst format exists.
   `RLE_W=0` unchanged.
 - Host unit tests for expansion, exports, and the config checks.
 - Verilator lint, static parity, hardware run on a board build with
-  `RLE_W=16`.
+  `RLE_W=16`: the DE25-Nano reference design (both variants) runs
+  `TestRunLengthCapture` on a second ELA channel that holds each value for
+  8 clocks.
+- A value-match trigger on a held value can fire after the run's first
+  clock (on the first clock the pre-trigger window is full). The trigger
+  still opens a new entry, so that run shows up as two entries. The
+  hardware tests trigger on a value change to keep the runs whole.
