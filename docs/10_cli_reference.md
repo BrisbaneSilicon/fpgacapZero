@@ -231,6 +231,7 @@ Usage: `fcapz [global options] configure [options]`
 | `--trigger-holdoff N` | `0` | Ignore trigger hits for N sample-clock cycles after arm or segmented auto-rearm. Distinct from --trigger-delay, which moves the committed trigger sample later. |
 | `--trigger-delay N` | `0` | Post-trigger delay in sample-clock cycles (0..65535). Shifts the committed trigger sample N cycles after the trigger event to compensate for upstream pipeline latency. |
 | `--rle` | off | Run-length capture: store each run of a repeated sample once, with its length. Pre/post-trigger lengths then count runs. Needs a core built with RLE_W; not with decimation or storage qualification. |
+| `--post-clocks N` | `0` | With --rle: also end the post-trigger window N sample clocks after the trigger, if --posttrigger runs have not ended it first (0 = no clock limit). |
 | `--profile NAME` | — | Use named probe list from gui.toml section [probe_profiles.NAME] |
 
 <!-- END GENERATED cli:configure -->

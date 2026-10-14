@@ -1234,6 +1234,42 @@ class RunLengthTests(unittest.TestCase):
                 analyzer.configure(self._cfg(rle=True, **kw))
             self.assertEqual(transport.regs, before)
 
+    def test_post_clocks_is_written_and_clamped_to_the_register(self):
+        transport = RunLengthTransport(rle_w=8)
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        analyzer.configure(self._cfg(rle=True, post_clocks=20))
+        self.assertEqual(transport.regs[0x0090], 20)
+        # DEPTH 1024: LEN_W 11, + RLE_W 8 = 19 bits.
+        analyzer.configure(self._cfg(rle=True, post_clocks=1 << 40))
+        self.assertEqual(transport.regs[0x0090], (1 << 19) - 1)
+        # A plain capture clears a limit left by an earlier one.
+        analyzer.configure(self._cfg())
+        self.assertEqual(transport.regs[0x0090], 0)
+
+        wide = RunLengthTransport(rle_w=16)
+        analyzer = Analyzer(wide)
+        analyzer.connect()
+        analyzer.configure(self._cfg(rle=True, post_clocks=1 << 40))
+        self.assertEqual(wide.regs[0x0090], (1 << 27) - 1)
+
+        plain = RunLengthTransport(rle_w=0)
+        analyzer = Analyzer(plain)
+        analyzer.connect()
+        analyzer.configure(self._cfg())
+        self.assertNotIn(0x0090, plain.regs)
+
+    def test_post_clocks_needs_rle(self):
+        for kw, msg in (({"post_clocks": 5}, "needs run-length"),
+                        ({"rle": True, "post_clocks": -1}, ">= 0")):
+            transport = RunLengthTransport()
+            analyzer = Analyzer(transport)
+            analyzer.connect()
+            before = dict(transport.regs)
+            with self.assertRaisesRegex(ValueError, msg):
+                analyzer.configure(self._cfg(**kw))
+            self.assertEqual(transport.regs, before)
+
     def test_window_readout_sets_and_restores_the_count_select(self):
         transport = RunLengthTransport()
         _, result = self._capture(transport)

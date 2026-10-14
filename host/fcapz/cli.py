@@ -176,6 +176,7 @@ def _build_config(args: argparse.Namespace) -> CaptureConfig:
         trigger_holdoff=getattr(args, "trigger_holdoff", 0),
         trigger_delay=getattr(args, "trigger_delay", 0),
         rle=getattr(args, "rle", False),
+        post_clocks=getattr(args, "post_clocks", 0),
     )
 
 
@@ -499,6 +500,17 @@ def build_parser() -> argparse.ArgumentParser:
                 "with its length. Pre/post-trigger lengths then count runs. "
                 "Needs a core built with RLE_W; not with decimation or "
                 "storage qualification."
+            ),
+        )
+        parser.add_argument(
+            "--post-clocks",
+            type=_non_negative_int,
+            default=0,
+            metavar="N",
+            help=(
+                "With --rle: also end the post-trigger window N sample clocks "
+                "after the trigger, if --posttrigger runs have not ended it "
+                "first (0 = no clock limit)."
             ),
         )
         parser.add_argument(

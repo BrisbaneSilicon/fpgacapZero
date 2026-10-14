@@ -98,6 +98,8 @@ _ADDR_COMPARE_CAPS = 0x00E0
 # Run-length capture (RLE_W cores).  RLE_W reads 0 on cores without it.
 _ADDR_RLE_CTRL = 0x00A8
 _ADDR_RLE_W = 0x00CC
+# Post-trigger clock limit, RLE only (0 = none).  min(32, LEN_W + RLE_W) bits.
+_ADDR_RLE_POST_CLKS = 0x0090
 _RLE_CTRL_ENABLE = 1 << 0         # taken on arm
 _RLE_CTRL_WINDOW_COUNTS = 1 << 1  # timestamp DATA window returns run counts
 # BURST_PTR[31:30] = 0b11 bursts run counts on the timestamp lane.
@@ -270,6 +272,10 @@ class CaptureConfig:
                                # each stored entry is a sample plus how many
                                # sample clocks it held.  Pre/post-trigger
                                # lengths then count entries, not clocks.
+    post_clocks: int = 0       # run-length only: also end the post-trigger
+                               # window this many sample clocks after the
+                               # trigger, if posttrigger entries have not
+                               # ended it first (0 = no clock limit)
 
 
 @dataclass
@@ -281,9 +287,10 @@ class CaptureResult:
     timestamps: List[int] = field(default_factory=list)
     segment: int = 0  # which segment this result is from
     # Run-length capture: sample clocks each entry in ``samples`` held (empty
-    # when the capture was not run-length).  The last entry ends the capture
-    # on the clock it starts, so its length is reported as 1 and the signal
-    # may have held longer.
+    # when the capture was not run-length).  The last entry is cut where the
+    # capture ends: on the clock it starts (length 1) when posttrigger
+    # entries end it, or on the post_clocks stop clock.  The signal may have
+    # held longer.
     run_lengths: List[int] = field(default_factory=list)
 
 
@@ -614,6 +621,10 @@ class Analyzer:
             raise ValueError(
                 f"trigger_holdoff must be 0..65535, got {config.trigger_holdoff}"
             )
+        if config.post_clocks < 0:
+            raise ValueError(f"post_clocks must be >= 0, got {config.post_clocks}")
+        if config.post_clocks and not config.rle:
+            raise ValueError("post_clocks needs run-length capture (rle=True)")
 
         self._validate_probes(config.probes, config.sample_width)
 
@@ -722,6 +733,13 @@ class Analyzer:
             # capture left by an earlier configure().
             self.transport.write_reg(
                 _ADDR_RLE_CTRL, _RLE_CTRL_ENABLE if config.rle else 0
+            )
+            # Clamped to the register: a larger limit would never be reached
+            # (a window of DEPTH entries spans fewer clocks).
+            post_clk_max = (1 << min(32, hw_depth.bit_length() + self._hw_rle_w)) - 1
+            self.transport.write_reg(
+                _ADDR_RLE_POST_CLKS,
+                min(config.post_clocks, post_clk_max) if config.rle else 0,
             )
 
         if config.sequence is not None:

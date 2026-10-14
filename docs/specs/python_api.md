@@ -383,6 +383,7 @@ Everything `Analyzer.configure` writes to the ELA before a capture.
 | `trigger_holdoff` | `int` | `0` | sample-clock cycles to ignore triggers after arm/re-arm |
 | `trigger_delay` | `int` | `0` | post-trigger delay in sample-clock cycles (0..65535) — shifts the committed trigger sample N cycles after the trigger event, compensating for upstream pipeline latency |
 | `rle` | `bool` | `False` | run-length capture (cores built with RLE_W): each stored entry is a sample plus how many sample clocks it held. Pre/post-trigger lengths then count entries, not clocks. |
+| `post_clocks` | `int` | `0` | run-length only: also end the post-trigger window this many sample clocks after the trigger, if posttrigger entries have not ended it first (0 = no clock limit) |
 
 ### `CaptureResult`
 
@@ -399,7 +400,7 @@ One capture read back by `Analyzer.capture`, with the config that made it.
 | `samples` | `List[int]` | `list()` |  |
 | `overflow` | `bool` | `False` |  |
 | `timestamps` | `List[int]` | `list()` |  |
-| `segment` | `int` | `0` | which segment this result is from Run-length capture: sample clocks each entry in ``samples`` held (empty when the capture was not run-length). The last entry ends the capture on the clock it starts, so its length is reported as 1 and the signal may have held longer. |
+| `segment` | `int` | `0` | which segment this result is from Run-length capture: sample clocks each entry in ``samples`` held (empty when the capture was not run-length). The last entry is cut where the capture ends: on the clock it starts (length 1) when posttrigger entries end it, or on the post_clocks stop clock. The signal may have held longer. |
 | `run_lengths` | `List[int]` | `list()` |  |
 
 ### `ProbeSpec`
