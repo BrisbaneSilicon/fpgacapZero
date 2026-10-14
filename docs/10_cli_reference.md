@@ -230,6 +230,7 @@ Usage: `fcapz [global options] configure [options]`
 | `--startup-arm` | off | Leave the ELA armed after reset / configuration recovery. Useful with bitstreams that want to begin capturing immediately after startup or after an explicit RESET. |
 | `--trigger-holdoff N` | `0` | Ignore trigger hits for N sample-clock cycles after arm or segmented auto-rearm. Distinct from --trigger-delay, which moves the committed trigger sample later. |
 | `--trigger-delay N` | `0` | Post-trigger delay in sample-clock cycles (0..65535). Shifts the committed trigger sample N cycles after the trigger event to compensate for upstream pipeline latency. |
+| `--rle` | off | Run-length capture: store each run of a repeated sample once, with its length. Pre/post-trigger lengths then count runs. Needs a core built with RLE_W; not with decimation or storage qualification. |
 | `--profile NAME` | — | Use named probe list from gui.toml section [probe_profiles.NAME] |
 
 <!-- END GENERATED cli:configure -->

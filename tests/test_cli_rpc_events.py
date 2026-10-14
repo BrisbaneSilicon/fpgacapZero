@@ -550,6 +550,12 @@ class RpcBooleanValidationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 RpcServer._build_config({"startup_arm": raw})
 
+    def test_rle_flag(self):
+        self.assertFalse(RpcServer._build_config({}).rle)
+        self.assertTrue(RpcServer._build_config({"rle": True}).rle)
+        with self.assertRaises(ValueError):
+            RpcServer._build_config({"rle": 2})
+
 
 class CliTests(unittest.TestCase):
     def test_eio_parsers_accept_base_addr_for_shared_chain(self):
@@ -593,6 +599,12 @@ class CliTests(unittest.TestCase):
         config = _build_config(args)
         self.assertTrue(config.startup_arm)
         self.assertEqual(config.trigger_holdoff, 12)
+
+    def test_capture_parser_accepts_rle(self):
+        parser = build_parser()
+        base = ["capture", "--out", "capture.json"]
+        self.assertFalse(_build_config(parser.parse_args(base)).rle)
+        self.assertTrue(_build_config(parser.parse_args([*base, "--rle"])).rle)
 
 
 class RpcServerHarness(RpcServer):

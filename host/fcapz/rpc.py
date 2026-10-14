@@ -623,6 +623,7 @@ class RpcServer:
                 int(req.get("trigger_holdoff", 0))
             ),
             trigger_delay=cls._validated_trigger_delay(int(req.get("trigger_delay", 0))),
+            rle=cls._validated_bool(req.get("rle", False), field="rle"),
         )
 
     @staticmethod

@@ -175,6 +175,7 @@ def _build_config(args: argparse.Namespace) -> CaptureConfig:
         startup_arm=getattr(args, "startup_arm", False),
         trigger_holdoff=getattr(args, "trigger_holdoff", 0),
         trigger_delay=getattr(args, "trigger_delay", 0),
+        rle=getattr(args, "rle", False),
     )
 
 
@@ -488,6 +489,16 @@ def build_parser() -> argparse.ArgumentParser:
                 "Post-trigger delay in sample-clock cycles (0..65535). "
                 "Shifts the committed trigger sample N cycles after the "
                 "trigger event to compensate for upstream pipeline latency."
+            ),
+        )
+        parser.add_argument(
+            "--rle",
+            action="store_true",
+            help=(
+                "Run-length capture: store each run of a repeated sample once, "
+                "with its length. Pre/post-trigger lengths then count runs. "
+                "Needs a core built with RLE_W; not with decimation or "
+                "storage qualification."
             ),
         )
         parser.add_argument(
