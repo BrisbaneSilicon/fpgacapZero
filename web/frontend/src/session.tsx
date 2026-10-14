@@ -45,6 +45,9 @@ export interface ElaConfig {
   segmented: boolean;
   /** Run-length capture: store a repeated sample once with its clock count. */
   rle: boolean;
+  /** Run-length only: end the post-trigger window this many clocks after the
+   *  trigger, if the post-trigger entries have not ended it (0 = off). */
+  postClocks: string;
   probesText: string;
 }
 
@@ -63,6 +66,7 @@ export const DEFAULT_ELA: ElaConfig = {
   sequenceJson: "",
   segmented: false,
   rle: false,
+  postClocks: "0",
   probesText: "",
 };
 

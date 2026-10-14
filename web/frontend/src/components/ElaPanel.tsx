@@ -87,6 +87,23 @@ export function ElaPanel() {
             Run-length capture
           </label>
         ) : null}
+        {Number(identity?.rle_width) > 0 && ela.rle ? (
+          <label
+            title={
+              "Also end the post-trigger window this many sample clocks " +
+              "after the trigger, if the post-trigger entries have not ended " +
+              "it first. 0 = off."
+            }
+          >
+            Post-trigger clock limit
+            <input
+              type="number"
+              min={0}
+              value={ela.postClocks}
+              onChange={(e) => setEla({ postClocks: e.target.value })}
+            />
+          </label>
+        ) : null}
       </div>
       <input
         type="range"
