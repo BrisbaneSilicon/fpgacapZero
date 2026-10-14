@@ -254,7 +254,8 @@ Write `result` to `out_path` as JSON.
 export_csv_text(result: CaptureResult) -> str
 ```
 
-Return `result` as CSV text: `index,value` (plus `timestamp` if present).
+Return `result` as CSV text: `index,value`, plus `timestamp` and
+`run_length` columns when the capture has them.
 
 #### `Analyzer.write_csv`
 
@@ -381,6 +382,7 @@ Everything `Analyzer.configure` writes to the ELA before a capture.
 | `startup_arm` | `bool` | `False` | runtime STARTUP_ARM register (0xD8): if True a soft reset re-arms the core. Distinct from the compile-time STARTUP_ARM RTL parameter, which sets the power-up (boot-armed) value. |
 | `trigger_holdoff` | `int` | `0` | sample-clock cycles to ignore triggers after arm/re-arm |
 | `trigger_delay` | `int` | `0` | post-trigger delay in sample-clock cycles (0..65535) — shifts the committed trigger sample N cycles after the trigger event, compensating for upstream pipeline latency |
+| `rle` | `bool` | `False` | run-length capture (cores built with RLE_W): each stored entry is a sample plus how many sample clocks it held. Pre/post-trigger lengths then count entries, not clocks. |
 
 ### `CaptureResult`
 
@@ -397,7 +399,8 @@ One capture read back by `Analyzer.capture`, with the config that made it.
 | `samples` | `List[int]` | `list()` |  |
 | `overflow` | `bool` | `False` |  |
 | `timestamps` | `List[int]` | `list()` |  |
-| `segment` | `int` | `0` | which segment this result is from |
+| `segment` | `int` | `0` | which segment this result is from Run-length capture: sample clocks each entry in ``samples`` held (empty when the capture was not run-length). The last entry ends the capture on the clock it starts, so its length is reported as 1 and the signal may have held longer. |
+| `run_lengths` | `List[int]` | `list()` |  |
 
 ### `ProbeSpec`
 
@@ -1007,6 +1010,20 @@ so it must not be read through the window.  Raises
 `BurstIntegrityError` when a burst ran but returned the wrong
 number of timestamps.
 
+#### `XilinxHwServerTransport.read_run_length_block`
+
+```python
+read_run_length_block(n_entries: int, lane_width: int) -> List[int]
+```
+
+Read one run count per captured entry via the burst DR.
+
+Counts travel on the timestamp lane, `lane_width` bits per element
+(the core's timestamp width, or its RLE_W without timestamps).  Raises
+`BurstUnavailableError`, before any scan, when burst readout is
+off, and `BurstIntegrityError` when a burst ran but returned the
+wrong number of counts.
+
 #### `XilinxHwServerTransport.read_timestamp_block`
 
 ```python
@@ -1211,6 +1228,19 @@ read_timestamp_block(addr: int, words: int, timestamp_width: int) -> List[int]
 ```
 
 Read timestamp words through the Intel/Altera DATA_CHAIN burst path.
+
+#### `QuartusStpTransport.read_run_length_block`
+
+```python
+read_run_length_block(n_entries: int, lane_width: int) -> List[int]
+```
+
+Read one run count per captured entry through the DATA_CHAIN burst.
+
+Counts travel on the timestamp lane, `lane_width` bits per element
+(the core's timestamp width, or its RLE_W without timestamps).  Raises
+`BurstUnavailableError`, before any scan, when burst readout is
+off, so the caller can read the window instead.
 
 #### `QuartusStpTransport.read_sample_block`
 

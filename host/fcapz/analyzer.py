@@ -95,6 +95,13 @@ _MGR_CAP_BURST_START = 0x4
 _ADDR_STARTUP_ARM = 0x00D8
 _ADDR_TRIG_HOLDOFF = 0x00DC
 _ADDR_COMPARE_CAPS = 0x00E0
+# Run-length capture (RLE_W cores).  RLE_W reads 0 on cores without it.
+_ADDR_RLE_CTRL = 0x00A8
+_ADDR_RLE_W = 0x00CC
+_RLE_CTRL_ENABLE = 1 << 0         # taken on arm
+_RLE_CTRL_WINDOW_COUNTS = 1 << 1  # timestamp DATA window returns run counts
+# BURST_PTR[31:30] = 0b11 bursts run counts on the timestamp lane.
+_RLE_MAX_W = 16
 
 _COMPARE_CAPS_LEGACY_FULL = 0x1FF
 _COMPARE_CAPS_LIGHTWEIGHT = 0x1C3
@@ -112,6 +119,7 @@ _ELA_PROBE_ADDRS: tuple[int, ...] = (
     _ADDR_NUM_SEGMENTS,
     _ADDR_PROBE_MUX_W,
     _ADDR_COMPARE_CAPS,
+    _ADDR_RLE_W,
 )
 _ADDR_SQ_MODE = 0x0030
 _ADDR_SQ_VALUE = 0x0034
@@ -258,6 +266,10 @@ class CaptureConfig:
                                # (0..65535) — shifts the committed trigger
                                # sample N cycles after the trigger event,
                                # compensating for upstream pipeline latency
+    rle: bool = False          # run-length capture (cores built with RLE_W):
+                               # each stored entry is a sample plus how many
+                               # sample clocks it held.  Pre/post-trigger
+                               # lengths then count entries, not clocks.
 
 
 @dataclass
@@ -268,13 +280,54 @@ class CaptureResult:
     overflow: bool = False
     timestamps: List[int] = field(default_factory=list)
     segment: int = 0  # which segment this result is from
+    # Run-length capture: sample clocks each entry in ``samples`` held (empty
+    # when the capture was not run-length).  The last entry ends the capture
+    # on the clock it starts, so its length is reported as 1 and the signal
+    # may have held longer.
+    run_lengths: List[int] = field(default_factory=list)
+
+
+def entry_start_clocks(result: CaptureResult) -> list[int]:
+    """Sample clock, from the first entry, at which each entry starts.
+
+    ``0 .. n-1`` when the capture is not run-length.
+    """
+    n = len(result.samples)
+    if len(result.run_lengths) != n:
+        return list(range(n))
+    out: list[int] = []
+    clock = 0
+    for length in result.run_lengths:
+        out.append(clock)
+        clock += int(length)
+    return out
+
+
+def expand_run_lengths(result: CaptureResult, max_samples: int = 1 << 24) -> list[int]:
+    """One sample per sample clock: each entry repeated for its run length.
+
+    Returns ``result.samples`` unchanged when the capture is not run-length.
+    Raises `ValueError` when the expansion would exceed ``max_samples``.
+    """
+    if len(result.run_lengths) != len(result.samples):
+        return list(result.samples)
+    total = sum(int(n) for n in result.run_lengths)
+    if total > max_samples:
+        raise ValueError(
+            f"expanding the run lengths gives {total} samples, over max_samples={max_samples}"
+        )
+    out: list[int] = []
+    for value, length in zip(result.samples, result.run_lengths):
+        out.extend([value] * int(length))
+    return out
 
 
 def vcd_simulation_times(result: CaptureResult) -> list[int]:
     """Per-sample times for VCD ``#`` lines (``len(result.samples)`` entries).
 
     Without hardware timestamps this is ``0 .. n-1`` (one time unit per stored
-    sample, matching the historical behaviour).
+    sample, matching the historical behaviour), or for a run-length capture
+    each entry's start clock (:func:`entry_start_clocks`).
 
     With timestamps, values are **shifted by the first sample** so each dump
     starts at 0 while preserving relative spacing. Raw counters often jump
@@ -297,7 +350,7 @@ def vcd_simulation_times(result: CaptureResult) -> list[int]:
             out.append(t)
             last = t
         return out
-    return list(range(n))
+    return entry_start_clocks(result)
 
 
 def _selected_transaction(method):
@@ -346,6 +399,7 @@ class Analyzer:
         self._manager_override = None if manager is None else bool(manager)
         self._config: CaptureConfig | None = None
         self._hw_timestamp_w: int = 0
+        self._hw_rle_w: int = 0
         self._hw_num_segments: int = 1
         self._hw_compare_caps: int = 0
         # (MGR_CAPS, MGR_COUNT), read once per session.
@@ -589,6 +643,20 @@ class Analyzer:
         sq_mode = _sq_mode_register(raw_compare_caps, config.stor_qual_mode)
         self._hw_timestamp_w = int(_read(_ADDR_TIMESTAMP_W))
         self._hw_num_segments = max(1, int(_read(_ADDR_NUM_SEGMENTS)))
+        hw_rle_w = int(_read(_ADDR_RLE_W))
+        self._hw_rle_w = hw_rle_w if 0 < hw_rle_w <= _RLE_MAX_W else 0
+        if config.rle:
+            # Checked before any write, like the SQ mode above.
+            if not self._hw_rle_w:
+                raise ValueError(
+                    "run-length capture not present in this bitstream (RLE_W=0)"
+                )
+            if config.decimation:
+                raise ValueError("run-length capture cannot be combined with decimation")
+            if config.stor_qual_mode:
+                raise ValueError(
+                    "run-length capture cannot be combined with storage qualification"
+                )
 
         # Segment depth check
         if self._hw_num_segments > 1:
@@ -649,6 +717,12 @@ class Analyzer:
         self.transport.write_reg(_ADDR_SQ_MODE, sq_mode)
         self.transport.write_reg(_ADDR_SQ_VALUE, config.stor_qual_value & 0xFFFF_FFFF)
         self.transport.write_reg(_ADDR_SQ_MASK, config.stor_qual_mask & 0xFFFF_FFFF)
+        if self._hw_rle_w:
+            # Always written on RLE cores, so rle=False turns off a run-length
+            # capture left by an earlier configure().
+            self.transport.write_reg(
+                _ADDR_RLE_CTRL, _RLE_CTRL_ENABLE if config.rle else 0
+            )
 
         if config.sequence is not None:
             if hw_trig_stages == 0:
@@ -821,6 +895,48 @@ class Analyzer:
             raw = self.transport.read_block(ts_base, ts_word_count)
         return _join_timestamp_words(raw, ts_words_per, mask)
 
+    @_selected_transaction
+    def _read_run_lengths(self, total: int) -> list[int]:
+        """Read the run length (sample clocks) of each captured entry.
+
+        Empty unless the configured capture is run-length.  Counts travel on
+        the timestamp lane: a burst with ``BURST_PTR[31:30] = 0b11`` when the
+        transport has one, else the timestamp DATA window with
+        ``RLE_CTRL[1]`` set.
+        """
+        self._select_instance()
+        if not (self._config is not None and self._config.rle and self._hw_rle_w):
+            return []
+        if total <= 0:
+            return []
+        # The lane is as wide as the timestamps, or the counts without them.
+        lane_w = self._hw_timestamp_w or self._hw_rle_w
+        mask = (1 << self._hw_rle_w) - 1
+
+        burst = getattr(self.transport, "read_run_length_block", None)
+        if callable(burst) and self._selected_slot_has_burst():
+            try:
+                raw = burst(total, lane_w)
+            except BurstUnavailableError as exc:
+                _log.info("run-length burst unavailable (%s); reading the window", exc)
+            else:
+                return [(v & mask) + 1 for v in raw]
+
+        self._set_data_window_end()
+        words_per_sample = (self._config.sample_width + 31) // 32
+        base = _ADDR_DATA_BASE + self._config.depth * words_per_sample * 4
+        words_per = (lane_w + 31) // 32
+        # Bit 0 is kept: it is taken on arm, and a re-arm without configure()
+        # (continuous capture) must still capture run-length.
+        self.transport.write_reg(
+            _ADDR_RLE_CTRL, _RLE_CTRL_ENABLE | _RLE_CTRL_WINDOW_COUNTS
+        )
+        try:
+            raw = self.transport.read_block(base, total * words_per)
+        finally:
+            self.transport.write_reg(_ADDR_RLE_CTRL, _RLE_CTRL_ENABLE)
+        return [c + 1 for c in _join_timestamp_words(raw, words_per, mask)]
+
     def _behind_manager(self) -> bool:
         """Return whether this core sits behind a core manager.
 
@@ -863,8 +979,9 @@ class Analyzer:
         inside its DATA + timestamp windows (``DEPTH`` bounds the capture)."""
         sample_w = max(1, int(read(_ADDR_SAMPLE_W)))
         depth = int(read(_ADDR_DEPTH))
-        ts_w = int(read(_ADDR_TIMESTAMP_W))
-        words_per_sample = (sample_w + 31) // 32 + (ts_w + 31) // 32
+        # The aux window holds timestamps, or run counts on a core without them.
+        aux_w = int(read(_ADDR_TIMESTAMP_W)) or int(read(_ADDR_RLE_W))
+        words_per_sample = (sample_w + 31) // 32 + (aux_w + 31) // 32
         return addr < _ADDR_DATA_BASE + depth * words_per_sample * 4
 
     @staticmethod
@@ -1030,12 +1147,14 @@ class Analyzer:
                     samples.append(val & mask)
 
             timestamps = self._read_timestamps(total)
+            run_lengths = self._read_run_lengths(total)
 
         return CaptureResult(
             config=self._config,
             samples=samples,
             overflow=bool(status & _STATUS_OVERFLOW),
             timestamps=timestamps,
+            run_lengths=run_lengths,
         )
 
     def wait_all_segments_done(
@@ -1079,6 +1198,7 @@ class Analyzer:
                 samples.append(val & mask)
 
         timestamps = self._read_timestamps(total)
+        run_lengths = self._read_run_lengths(total)
 
         return CaptureResult(
             config=self._config,
@@ -1086,6 +1206,7 @@ class Analyzer:
             overflow=bool(status & _STATUS_OVERFLOW),
             timestamps=timestamps,
             segment=seg_idx,
+            run_lengths=run_lengths,
         )
 
     def export_json(self, result: CaptureResult) -> Dict:
@@ -1114,6 +1235,11 @@ class Analyzer:
             d["timestamps"] = [
                 {"index": i, "value": v} for i, v in enumerate(result.timestamps)
             ]
+        if result.run_lengths:
+            # Sample clocks per entry; the last entry is open-ended.
+            d["run_lengths"] = [
+                {"index": i, "value": v} for i, v in enumerate(result.run_lengths)
+            ]
         return d
 
     def write_json(self, result: CaptureResult, out_path: str) -> None:
@@ -1123,15 +1249,21 @@ class Analyzer:
         )
 
     def export_csv_text(self, result: CaptureResult) -> str:
-        """Return ``result`` as CSV text: ``index,value`` (plus ``timestamp`` if present)."""
+        """Return ``result`` as CSV text: ``index,value``, plus ``timestamp`` and
+        ``run_length`` columns when the capture has them."""
+        n = len(result.samples)
+        columns: list[tuple[str, list[int]]] = []
         if result.timestamps:
-            lines = ["index,value,timestamp"]
-            for i, (v, t) in enumerate(zip(result.samples, result.timestamps)):
-                lines.append(f"{i},{v},{t}")
-        else:
-            lines = ["index,value"]
-            for i, v in enumerate(result.samples):
-                lines.append(f"{i},{v}")
+            columns.append(("timestamp", result.timestamps))
+        if len(result.run_lengths) == n and n:
+            columns.append(("run_length", result.run_lengths))
+        if result.timestamps:
+            # Rows stop at the shorter of samples and timestamps, as before.
+            n = min(n, len(result.timestamps))
+        lines = [",".join(["index", "value", *(name for name, _ in columns)])]
+        for i in range(n):
+            row = [str(i), str(result.samples[i]), *(str(col[i]) for _, col in columns)]
+            lines.append(",".join(row))
         return "\n".join(lines) + "\n"
 
     def write_csv(self, result: CaptureResult, out_path: str) -> None:
@@ -1312,7 +1444,7 @@ class Analyzer:
     @_selected_transaction
     def _read_ela_probe_registers_raw(
         self,
-    ) -> tuple[int, int, int, int, int, int, int, int, int]:
+    ) -> tuple[int, int, int, int, int, int, int, int, int, int]:
         """Read ELA identity / feature registers on this analyzer's chain."""
         self._select_instance()
         piped = getattr(self.transport, "read_regs_pipelined_user1", None)
@@ -1327,6 +1459,7 @@ class Analyzer:
             num_segments = max(1, int(vals[6]))
             probe_mux_w = int(vals[7])
             compare_caps = int(vals[8])
+            rle_w = int(vals[9])
         else:
             _vread = self.transport.read_reg_stable
             version = int(_vread(_ADDR_VERSION))
@@ -1338,6 +1471,9 @@ class Analyzer:
             num_segments = max(1, int(_vread(_ADDR_NUM_SEGMENTS)))
             probe_mux_w = int(_vread(_ADDR_PROBE_MUX_W))
             compare_caps = int(_vread(_ADDR_COMPARE_CAPS))
+            rle_w = int(_vread(_ADDR_RLE_W))
+        if not 0 <= rle_w <= _RLE_MAX_W:
+            rle_w = 0
         if compare_caps == 0:
             compare_caps = _COMPARE_CAPS_LEGACY_FULL
         return (
@@ -1350,6 +1486,7 @@ class Analyzer:
             num_segments,
             probe_mux_w,
             compare_caps,
+            rle_w,
         )
 
     @staticmethod
@@ -1363,6 +1500,7 @@ class Analyzer:
         num_segments: int,
         probe_mux_w: int,
         compare_caps: int,
+        rle_w: int = 0,
     ) -> Dict:
         core_id = version & 0xFFFF
         return {
@@ -1387,6 +1525,8 @@ class Analyzer:
             # their full sample width, not just comparator A's low 32 bits, via
             # the wide-comparator window that configure() programs.
             "has_wide_trigger": bool(compare_caps & _COMPARE_CAPS_WIDE_TRIG),
+            # Run-count width of a run-length capture core (0 = not built).
+            "rle_width": rle_w,
         }
 
     def probe_optional(self) -> Optional[Dict]:
@@ -1396,12 +1536,14 @@ class Analyzer:
         (EIO, EJTAG-AXI, UART, …) even if the primary ELA register window does
         not present the ``'LA'`` core id.  JTAG/transport errors still propagate.
         """
-        version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps = (
+        version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps, rlew = (
             self._read_ela_probe_registers_raw()
         )
         if (version & 0xFFFF) != _ELA_CORE_ID:
             return None
-        return self._probe_dict_from_raw(version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps)
+        return self._probe_dict_from_raw(
+            version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps, rlew
+        )
 
     def probe(self) -> Dict:
         """Read the ELA identity and feature registers.
@@ -1423,7 +1565,7 @@ class Analyzer:
         trigger sequencer depth, 0 if absent), `has_storage_qualification`
         (FEATURES[4]), and the rest of the feature flags.
         """
-        version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps = (
+        version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps, rlew = (
             self._read_ela_probe_registers_raw()
         )
         core_id = version & 0xFFFF
@@ -1433,7 +1575,9 @@ class Analyzer:
                 f"expected 0x{_ELA_CORE_ID:04X} ('LA'), got 0x{core_id:04X}. "
                 f"Wrong JTAG chain, wrong bitstream, or core not loaded?"
             )
-        return self._probe_dict_from_raw(version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps)
+        return self._probe_dict_from_raw(
+            version, sw, dep, nch, feat, tsw, nseg, pmw, ccaps, rlew
+        )
 
 
 def _infer_ir_table_name(tap: str) -> str:
