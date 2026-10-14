@@ -264,6 +264,18 @@ class CapturePanel(QGroupBox):
 
         self._rle = QCheckBox("Store runs of a repeated sample once")
         self._rle.setObjectName("fcapz_capture_rle")
+        self._post_clocks = QSpinBox()
+        self._post_clocks.setObjectName("fcapz_capture_post_clocks")
+        self._post_clocks.setRange(0, 2_147_483_647)
+        self._post_clocks.setValue(0)
+        self._post_clocks.setSpecialValueText("off")
+        self._post_clocks.setToolTip(
+            "Run-length capture: also end the post-trigger window this many "
+            "sample clocks after the trigger, if the post-trigger entries have "
+            "not ended it first. 0 = off.",
+        )
+        self._rle.toggled.connect(self._sync_post_clocks_enabled)
+        self._sync_post_clocks_enabled()
 
         self._probes = QLineEdit()
         self._probes.setPlaceholderText("name:width:lsb,... (optional)")
@@ -360,6 +372,7 @@ class CapturePanel(QGroupBox):
         form_adv.addRow("Trigger holdoff", self._trig_holdoff)
         form_adv.addRow("Trigger delay", self._trig_delay)
         form_adv.addRow("Run-length capture", self._rle)
+        form_adv.addRow("Post-trigger clock limit", self._post_clocks)
         form_adv.addRow("Probes", row_probes)
         self._adv_section = CollapsibleSection(
             "Advanced (decimation, mux, ext trig, storage qual, probes, …)",
@@ -516,6 +529,7 @@ class CapturePanel(QGroupBox):
             self._stor_mask.setToolTip("")
             self._rle.setEnabled(True)
             self._rle.setToolTip("")
+            self._sync_post_clocks_enabled()
             with QSignalBlocker(self._probe_sel):
                 self._probe_sel.setMaximum(1023)
             self._probe_sel.setEnabled(True)
@@ -575,6 +589,7 @@ class CapturePanel(QGroupBox):
                 self._rle.setChecked(False)
             self._rle.setEnabled(False)
             self._rle.setToolTip("This ELA build has no run-length capture (RLE_W=0).")
+        self._sync_post_clocks_enabled()
 
         sw = max(1, int(self._hw_sample_w))
         pmw = int(self._hw_probe_mux_w)
@@ -668,6 +683,7 @@ class CapturePanel(QGroupBox):
             ("stor_qual_mode", self._stor_mode, 0),
             ("trigger_holdoff", self._trig_holdoff, 0),
             ("trigger_delay", self._trig_delay, 0),
+            ("post_clocks", self._post_clocks, 0),
         ):
             if key in entry:
                 try:
@@ -1115,7 +1131,12 @@ class CapturePanel(QGroupBox):
             trigger_holdoff=int(self._trig_holdoff.value()),
             trigger_delay=int(self._trig_delay.value()),
             rle=rle,
+            post_clocks=int(self._post_clocks.value()) if rle else 0,
         )
+
+    def _sync_post_clocks_enabled(self, *_args: object) -> None:
+        """The clock limit applies to run-length captures only."""
+        self._post_clocks.setEnabled(self._rle.isEnabled() and self._rle.isChecked())
 
     def wire_collapsible_persistence(self, callback: Callable[[], None]) -> None:
         self._adv_section.expandedChanged.connect(lambda _e: callback())
