@@ -2171,3 +2171,56 @@ async def rle_clock_limit_per_segment(dut):
     await ela.write(ADDR_SEG_SEL, 0)
     await ela.write(ADDR_RLE_POST_CLKS, 0)
     FUNCTIONAL_COVERAGE.hit("rle_post_clks")
+
+@cocotb.test()
+async def rle_segment_lengths_need_the_clock_limit(dut):
+    """Per-segment lengths are read back only for a capture with a clock
+    limit.  Mid-capture, an unfinished segment then reads 0; without a limit
+    every segment reads the capture length, as on a core without them."""
+    if NUM_SEGMENTS < 2:
+        return
+    ela = await setup(dut)
+    pre, post = 1, 3
+    seg = [0x71] * 2 + [0x81] * 2 + [RLE_TRIGGER] * 3 + [0x31] + [0x32] * 3 + [0x91] * 2
+
+    async def first_segment_only(rle_ctrl: int, n: int) -> None:
+        await ela.write(ADDR_RLE_CTRL, rle_ctrl)
+        await ela.write(ADDR_RLE_POST_CLKS, n)
+        await ela.configure_value_capture(pre=pre, post=post, value=RLE_TRIGGER)
+        dut.probe_in.value = 0
+        await ela.arm()
+        await _drive_stream(dut, seg, hold=0)
+        await ela.wait_sample(20)
+        assert not await ela.read(ADDR_STATUS) & 0x4
+
+    async def lengths() -> list[int]:
+        out = []
+        for s in range(NUM_SEGMENTS):
+            await ela.write(ADDR_SEG_SEL, s)
+            out.append(await ela.read(ADDR_CAPTURE_LEN))
+        await ela.write(ADDR_SEG_SEL, 0)
+        return out
+
+    # A full limited capture: every segment ends short, at 4 entries.
+    await ela.write(ADDR_RLE_CTRL, 1)
+    await ela.write(ADDR_RLE_POST_CLKS, 4)
+    await ela.configure_value_capture(pre=pre, post=post, value=RLE_TRIGGER)
+    dut.probe_in.value = 0
+    await ela.arm()
+    await _drive_stream(dut, seg * NUM_SEGMENTS, hold=0)
+    assert await ela.wait_done(800) & 0x4
+    assert await lengths() == [4] * NUM_SEGMENTS
+    # Mid-capture, segments not yet done read 0, not the last capture's.
+    await first_segment_only(1, 4)
+    limited = await lengths()
+    assert limited == [4] + [0] * (NUM_SEGMENTS - 1), limited
+    # No limit (RLE on, N = 0; RLE off with N set): the capture length.
+    for rle_ctrl, n in ((1, 0), (0, 4)):
+        await first_segment_only(rle_ctrl, n)
+        assert await lengths() == [pre + post + 1] * NUM_SEGMENTS, (rle_ctrl, n)
+    # A limited capture again.
+    await first_segment_only(1, 4)
+    assert await lengths() == limited
+    await ela.write(ADDR_RLE_POST_CLKS, 0)
+    await ela.write(ADDR_RLE_CTRL, 0)
+    FUNCTIONAL_COVERAGE.hit("rle_post_clks")

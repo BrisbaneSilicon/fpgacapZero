@@ -492,7 +492,8 @@ module fcapz_ela #(
     reg                  post_clk_one;  // the limit is 1
     reg [POST_CLK_W-1:0] post_clk_left;
     reg                  post_clk_last;
-    // Entries in each completed segment (HAS_RLE_SEG_LEN only).
+    // Entries in each completed segment (HAS_RLE_SEG_LEN only); cleared on
+    // arm.  Read back only for captures with a clock limit.
     reg [LEN_W-1:0] seg_len [0:NUM_SEGMENTS-1];
     reg [SAMPLE_W-1:0] probe_prev;
     // Trigger delay: when the comparator fires, count down trig_delay
@@ -912,7 +913,8 @@ module fcapz_ela #(
         (HAS_SEGMENTS && jtag_seg_sel < NUM_SEGMENTS) ? jtag_seg_sel : {SEG_IDX_W{1'b0}};
     wire [PTR_W-1:0] jtag_seg_start_ptr = rb_seg_start_ptr_jtag[jtag_seg_sel_clamped];
     // Entries the DATA window and CAPTURE_LEN cover: on segmented RLE builds
-    // the selected segment's, since a clock limit can end segments short.
+    // the selected segment's, since a clock limit can end segments short
+    // (the capture length for every segment without a limit).
     wire [LEN_W-1:0] rb_window_len_jtag = HAS_RLE_SEG_LEN
         ? rb_seg_len_jtag[jtag_seg_sel_clamped] : rb_capture_len_jtag;
     wire [PTR_W-1:0] datawin_start_ptr_w = HAS_SEGMENTS ? jtag_seg_start_ptr : rb_start_ptr_jtag;
@@ -1120,8 +1122,11 @@ module fcapz_ela #(
                 rb_start_ptr_sample <= start_ptr;
                 for (rb_sample_i = 0; rb_sample_i < NUM_SEGMENTS; rb_sample_i = rb_sample_i + 1) begin
                     rb_seg_start_ptr_sample[rb_sample_i] <= seg_start_ptr[rb_sample_i];
-                    rb_seg_len_sample[rb_sample_i] <= HAS_RLE_SEG_LEN ? seg_len[rb_sample_i]
-                                                                      : {LEN_W{1'b0}};
+                    // Without a clock limit every segment reads the
+                    // capture length, as on a core without seg_len.
+                    rb_seg_len_sample[rb_sample_i] <= !HAS_RLE_SEG_LEN ? {LEN_W{1'b0}}
+                                                    : post_clk_en ? seg_len[rb_sample_i]
+                                                    : capture_len;
                 end
                 rb_meta_toggle_sample <= ~rb_meta_toggle_sample;
                 rb_meta_pending_sample <= 1'b0;
@@ -1678,6 +1683,9 @@ module fcapz_ela #(
                 armed       <= 1'b1;
                 triggered   <= 1'b0;
                 done        <= 1'b0;
+                if (HAS_RLE_SEG_LEN)
+                    for (seg_i = 0; seg_i < NUM_SEGMENTS; seg_i = seg_i + 1)
+                        seg_len[seg_i] <= {LEN_W{1'b0}};
                 if (HAS_SEGMENTS)
                     wr_ptr  <= {PTR_W{1'b0}};
                 post_left   <= {LEN_W{1'b0}};

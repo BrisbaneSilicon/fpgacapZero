@@ -224,7 +224,8 @@ TARGETS: tuple[CocotbTarget, ...] = (
     CocotbTarget("rle4_ts48_seg4", {"RLE_W": 4, "DEPTH": 64, "TIMESTAMP_W": 48,
                                     "NUM_SEGMENTS": 4},
                  ("rle_registers", "rle_segments_start_new_entries",
-                  "rle_clock_limit_per_segment")),
+                  "rle_clock_limit_per_segment",
+                  "rle_segment_lengths_need_the_clock_limit")),
     CocotbTarget(
         "config_min",
         {"TRIG_STAGES": 1, "STOR_QUAL": 0, "DECIM_EN": 0, "EXT_TRIG_EN": 0, "DUAL_COMPARE": 0},

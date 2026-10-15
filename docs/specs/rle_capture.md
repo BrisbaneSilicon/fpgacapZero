@@ -95,10 +95,12 @@ An entry-based window can wait forever on an idle bus. `RLE_POST_CLKS`
   or as an extend of the open one. So the last entry can have count > 0.
 - `CAPTURE_LEN` reports the entries stored:
   `pre + post + 1 - post_left`, plus one if the stop clock opens an entry.
-  Segmented builds keep each segment's length (`seg_len`, snapshotted to the
-  JTAG side like the segment start pointers). `CAPTURE_LEN` and the DATA
-  window bound follow `SEG_SEL` there; the host already reads `CAPTURE_LEN`
-  per segment.
+  Segmented builds keep each segment's length (`seg_len`, cleared on arm and
+  snapshotted to the JTAG side like the segment start pointers). For a
+  capture with a clock limit, `CAPTURE_LEN` and the DATA window bound follow
+  `SEG_SEL`; the host already reads `CAPTURE_LEN` per segment. Without a
+  limit the snapshot copies the capture length into every segment, so they
+  read exactly as on a core without `seg_len`, mid-capture too.
 - Cost: about 5 x the register width in flip-flops, plus
   3 x `NUM_SEGMENTS` x `LEN_W` with segments.
 - Host: `CaptureConfig.post_clocks` (0 = off), CLI `--post-clocks`, RPC

@@ -48,7 +48,7 @@ in that bridge’s section.
 | `0x0010` | DEPTH | RO | Total capture depth in samples. |
 | `0x0014` | PRETRIG_LEN | RW | Pre-trigger sample count. |
 | `0x0018` | POSTTRIG_LEN | RW | Post-trigger sample count. |
-| `0x001C` | CAPTURE_LEN | RO | Captured sample count for the current or most recent run. On a segmented `RLE_W` core it is the length of the segment `SEG_SEL` selects (0 until that segment completes), because a clock limit (`RLE_POST_CLKS`) can end segments at different lengths. |
+| `0x001C` | CAPTURE_LEN | RO | Captured sample count for the current or most recent run. On a segmented `RLE_W` core, for a capture with a clock limit (`RLE_POST_CLKS`), it is the length of the segment `SEG_SEL` selects (0 until that segment completes), because the limit can end segments at different lengths. |
 | `0x0020` | TRIG_MODE | RW | Trigger mode; see [TRIG_MODE](#regmap-trig-mode). |
 | `0x0024` | TRIG_VALUE | RW | Trigger comparator value. |
 | `0x0028` | TRIG_MASK | RW | Trigger comparator mask. |

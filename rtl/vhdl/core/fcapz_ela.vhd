@@ -420,7 +420,8 @@ architecture rtl of fcapz_ela is
     signal clk_stop_now      : std_logic := '0';
     signal post_done_now     : std_logic := '0';
     signal capture_len_done  : unsigned(PTR_W downto 0) := (others => '0');
-    -- Entries in each completed segment (HAS_RLE_SEG_LEN only).
+    -- Entries in each completed segment (HAS_RLE_SEG_LEN only); cleared on
+    -- arm.  Read back only for captures with a clock limit.
     signal seg_len           : seg_len_t := (others => (others => '0'));
     signal probe_prev        : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
     signal decim_count       : unsigned(23 downto 0) := (others => '0');
@@ -532,7 +533,8 @@ architecture rtl of fcapz_ela is
     signal rb_seg_start_ptr_jtag  : seg_ptr_t := (others => 0);
     signal rb_seg_len_jtag        : seg_len_t := (others => (others => '0'));
     -- Entries the DATA window and CAPTURE_LEN cover: on segmented RLE builds
-    -- the selected segment's, since a clock limit can end segments short.
+    -- the selected segment's, since a clock limit can end segments short
+    -- (the capture length for every segment without a limit).
     signal rb_window_len_jtag     : unsigned(PTR_W downto 0) := (others => '0');
     signal rb_done_jtag           : std_logic := '0';
     signal rb_meta_sample_busy    : std_logic := '0';
@@ -1588,8 +1590,12 @@ begin
                 rb_capture_len_sample <= capture_len;
                 rb_start_ptr_sample <= start_ptr;
                 rb_seg_start_ptr_sample <= seg_start_ptr;
-                if HAS_RLE_SEG_LEN then
+                -- Without a clock limit every segment reads the capture
+                -- length, as on a core without seg_len.
+                if HAS_RLE_SEG_LEN and post_clk_en = '1' then
                     rb_seg_len_sample <= seg_len;
+                elsif HAS_RLE_SEG_LEN then
+                    rb_seg_len_sample <= (others => capture_len);
                 else
                     rb_seg_len_sample <= (others => (others => '0'));
                 end if;
@@ -1937,6 +1943,9 @@ begin
                 armed <= '1';
                 triggered <= '0';
                 done <= '0';
+                if HAS_RLE_SEG_LEN then
+                    seg_len <= (others => (others => '0'));
+                end if;
                 overflow <= '1' when len_sum_u(pretrig_len_sync2) + len_sum_u(posttrig_len_sync2) + 1 >
                                      len_sum_u(SEG_DEPTH) else '0';
                 if NUM_SEGMENTS > 1 then
