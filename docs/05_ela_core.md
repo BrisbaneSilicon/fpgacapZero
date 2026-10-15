@@ -61,6 +61,14 @@ commits a trigger, completes, nor advances a segment on that clock.
 started; a capture that completed while the `ARM` was crossing into the
 sample clock domain is not reported.
 
+The `CTRL` write that arms or soft-resets takes a snapshot of every capture
+setting (lengths, trigger, sequencer, decimation, external trigger, channel
+and probe select, storage qualification, holdoff, delay, run-length enable
+and clock limit, and `STARTUP_ARM` for the re-arm after a reset). That
+capture uses exactly the settings written before its `ARM`, however slow
+`sample_clk` is, and a setting written after the `ARM` waits for the next
+one. The `ARM` reaches the capture about four sample clocks after its write.
+
 On timing-sensitive builds, especially with `INPUT_PIPE=1`, the BRAM
 write command is itself registered: write enable, address, sample data,
 and timestamp data are captured together before they drive the inferred
@@ -777,8 +785,9 @@ cfg = CaptureConfig(
 > result = a.capture()
 > ```
 >
-> `force_idle()` issues a soft reset and re-resets if the cleared `STARTUP_ARM`
-> register has not yet crossed the clock domain, so a single call is enough. It
+> `force_idle()` issues a soft reset and re-resets if the core comes back
+> armed, as an older core can when the cleared `STARTUP_ARM` register has not
+> yet crossed the clock domain, so a single call is enough. It
 > is intentionally lossy — skip it when you *want* the from-boot capture (e.g.
 > the `STARTUP_ARM` validation tests, which deliberately use raw
 > `reset()`/`arm()`). For streaming, `capture_continuous(force_idle=True)`

@@ -120,6 +120,10 @@ B-combine sequencer configurations.
 - [1] `reset` (write 1 to reset)
 - [31:2] reserved
 
+A write with `arm` or `reset` set snapshots the capture settings for that
+capture (and, for `reset`, `STARTUP_ARM` for the re-arm). Settings written
+after it apply from the next arm or reset.
+
 <a id="regmap-status"></a>
 ### STATUS
 - [0] `armed`

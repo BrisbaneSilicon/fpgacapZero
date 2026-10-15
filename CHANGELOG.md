@@ -131,6 +131,19 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **ELA — a setting written just before ARM could miss that capture.** The
+  settings crossed into the sample clock through two synchronizer flops, but
+  the arm pulse came off the first flop of its own, one clock ahead. With a
+  sample clock slower than the JTAG writes, a setting and the ARM (or
+  `STARTUP_ARM` and a soft reset) landing on the same sample clock edge gave
+  that capture the old setting. The `CTRL` write that arms or soft-resets now
+  snapshots the settings in the JTAG domain, and the sample domain copies that
+  snapshot one clock before the pulse that uses it, so a capture takes exactly
+  the settings written before its ARM and none written after. The snapshot
+  replaces the first synchronizer stage, so the cost is four flip-flops, with
+  no new timing constraints. ARM and soft reset reach the capture two sample
+  clocks later than before. Older bitstreams keep the race; `force_idle()`
+  still covers it for `STARTUP_ARM`.
 - **ELA — storage qualification stored the wrong samples.** The core took
   `SQ_MODE` as the raw compare mode with 0 meaning off, so EQ could not be
   selected, and the host wrote 1 for "store when match" (NEQ on the core) and 2

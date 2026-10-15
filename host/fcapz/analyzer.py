@@ -518,17 +518,18 @@ class Analyzer:
         subsequent resets.
 
         A startup-armed core re-loads its auto-arm flag from that register on
-        every soft reset, so a single reset can race the configuration
+        every soft reset. Current cores take the register with the reset write,
+        but on older ones a single reset can race the configuration
         clock-domain crossing and come back still armed. ``force_idle`` polls
         STATUS after the reset and, if the core re-armed, resets again -- by which
         point the runtime STARTUP_ARM register cleared by :meth:`configure` has
         crossed into the sample domain -- up to ``max_resets`` times.
 
         Timing assumption: a STATUS read round-trips over JTAG far slower than
-        the core's reset-to-re-arm latency (a couple of sample clocks), so the
+        the core's reset-to-re-arm latency (a few sample clocks), so the
         first post-reset STATUS read reliably observes the settled state. This
         holds for any practical sample clock; only a sample clock so slow that a
-        full JTAG access spans fewer than ~2 sample cycles could read a
+        full JTAG access spans fewer than ~5 sample cycles could read a
         transient idle before a pending re-arm propagates.
 
         Note this is intentionally lossy: it discards any in-flight or
