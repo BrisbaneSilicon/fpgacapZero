@@ -452,7 +452,7 @@ async def oversize_length_is_reported_not_truncated(dut):
     await ela.write(ADDR_POSTTRIG, 0)
     assert await ela.read(ADDR_PRETRIG) == DEPTH, "register readback must keep the full write"
     await ela.arm()
-    # overflow latches in the arm block from pretrig_len_sync2, so poll rather
+    # overflow latches in the arm block from pretrig_len_stage, so poll rather
     # than assume the CDC has settled by any particular sample -- the sibling
     # overflow_and_reset test polls for the same reason.
     status = 0
@@ -1671,6 +1671,87 @@ async def config_written_after_arm_does_not_reach_armed_capture(dut):
     await ela.drive_counter(20)
     assert await ela.wait_done() & 0x4, "late external-trigger mode applied"
     assert await ela.read(ADDR_TRIG_EXT) == 2
+
+async def _arm_right_after(ela, addr: int, value: int) -> None:
+    """Write `addr` and then ARM within one sample period, so both writes
+    cross into the sample domain on the same sample_clk edge."""
+    await RisingEdge(ela.dut.sample_clk)
+    await ela.write(addr, value)
+    await ela.write(ADDR_CTRL, 0x1)
+    await ela.wait_armed()
+
+
+@cocotb.test()
+async def arm_takes_the_settings_written_before_it(dut):
+    """ARM snapshots the settings in the JTAG domain, so a setting written
+    right before ARM applies to that capture and one written right after it
+    does not, even with a sample clock slow enough that both writes cross on
+    the same sample_clk edge."""
+    ela = await setup(dut, sample_period_ns=1000)
+    await ela.configure_value_capture(pre=0, post=2, value=0, mask=0)
+    await _arm_right_after(ela, ADDR_POSTTRIG, 5)
+    await ela.drive_counter(12)
+    assert await ela.wait_done() & 0x4
+    assert await ela.read(ADDR_CAPTURE_LEN) == 6, "POSTTRIG written before ARM not applied"
+    await RisingEdge(dut.sample_clk)
+    await ela.write(ADDR_CTRL, 0x1)
+    await ela.write(ADDR_POSTTRIG, 2)
+    await ela.wait_armed()
+    await ela.drive_counter(12)
+    assert await ela.wait_done() & 0x4
+    assert await ela.read(ADDR_CAPTURE_LEN) == 6, "POSTTRIG written after ARM applied"
+
+    if RLE_W and NUM_SEGMENTS == 1:
+        # A clock limit written right before ARM ends the window as one
+        # that had settled does.
+        await ela.write(ADDR_POSTTRIG, 5)
+        await ela.write(ADDR_RLE_CTRL, 1)
+
+        async def limited_capture(race: bool) -> int:
+            await ela.write(ADDR_RLE_POST_CLKS, 0)
+            if race:
+                await _arm_right_after(ela, ADDR_RLE_POST_CLKS, 2)
+            else:
+                await ela.write(ADDR_RLE_POST_CLKS, 2)
+                await ela.arm()
+            await ela.drive_counter(12)
+            assert await ela.wait_done() & 0x4
+            return await ela.read(ADDR_CAPTURE_LEN)
+
+        settled = await limited_capture(race=False)
+        assert settled < 6, settled
+        assert await limited_capture(race=True) == settled
+        # A limit written right after ARM waits for the next capture.
+        await ela.write(ADDR_RLE_POST_CLKS, 0)
+        await RisingEdge(dut.sample_clk)
+        await ela.write(ADDR_CTRL, 0x1)
+        await ela.write(ADDR_RLE_POST_CLKS, 2)
+        await ela.wait_armed()
+        await ela.drive_counter(12)
+        assert await ela.wait_done() & 0x4
+        assert await ela.read(ADDR_CAPTURE_LEN) == 6, "clock limit written after ARM applied"
+        await ela.write(ADDR_RLE_POST_CLKS, 0)
+        await ela.write(ADDR_RLE_CTRL, 0)
+        FUNCTIONAL_COVERAGE.hit("rle_post_clks")
+
+
+@cocotb.test()
+async def startup_arm_written_just_before_reset_rearms(dut):
+    """A soft reset re-arms from the STARTUP_ARM it snapshots, also when the
+    two writes cross on the same sample_clk edge."""
+    ela = await setup(dut, sample_period_ns=1000)
+    await ela.write(ADDR_STARTUP_ARM, 0)
+    await ela.reset_core()
+    assert not int(dut.armed_out.value)
+    await RisingEdge(dut.sample_clk)
+    await ela.write(ADDR_STARTUP_ARM, 1)
+    await ela.write(ADDR_CTRL, 0x2)
+    await ela.wait_armed()
+    await RisingEdge(dut.sample_clk)
+    await ela.write(ADDR_STARTUP_ARM, 0)
+    await ela.write(ADDR_CTRL, 0x2)
+    await ela.wait_sample(10)
+    assert not int(dut.armed_out.value), "STARTUP_ARM = 0 written before reset not applied"
 
 
 async def _arm_offset_after_soft_reset(ela, decim_during_reset: int, phase: int) -> int:

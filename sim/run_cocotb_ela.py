@@ -85,6 +85,7 @@ RLE_TESTS = (
     "rle_counts_burst_on_the_timestamp_lane",
     "rle_clock_limit_ends_the_window",
     "rle_clock_limit_needs_rle",
+    "arm_takes_the_settings_written_before_it",
 )
 
 TARGETS: tuple[CocotbTarget, ...] = (
@@ -112,6 +113,8 @@ TARGETS: tuple[CocotbTarget, ...] = (
             "trigger_delay_startup_and_holdoff",
             "burst_start_register",
             "config_written_after_arm_does_not_reach_armed_capture",
+            "arm_takes_the_settings_written_before_it",
+            "startup_arm_written_just_before_reset_rearms",
             "rearm_mid_capture_restarts_cleanly",
         ),
     ),

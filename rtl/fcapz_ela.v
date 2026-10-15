@@ -394,40 +394,43 @@ module fcapz_ela #(
     reg [POST_CLK_W-1:0] jtag_rle_post_clks;  // 0 = no clock limit
 
     // ---- CDC sync registers ------------------------------------------------
-    reg arm_toggle_sync1, arm_toggle_sync2;
-    reg reset_toggle_sync1, reset_toggle_sync2;
+    // sync1 -> sync2 synchronize the toggles.  A toggle reaching sync2 stages
+    // the settings (cfg_stage_en); sync3 ^ sync4 then pulses with them in place.
+    reg arm_toggle_sync1, arm_toggle_sync2, arm_toggle_sync3, arm_toggle_sync4;
+    reg reset_toggle_sync1, reset_toggle_sync2, reset_toggle_sync3, reset_toggle_sync4;
 
-    // Narrowed to the bits actually used on the sample side, reducing FF count.
-    reg [LEN_W-1:0]    pretrig_len_sync1,  pretrig_len_sync2;
-    reg [LEN_W-1:0]    posttrig_len_sync1, posttrig_len_sync2;
-    reg [1:0]          trig_mode_sync1,    trig_mode_sync2;
-    reg [SAMPLE_W-1:0] trig_value_sync1,   trig_value_sync2;
-    reg [SAMPLE_W-1:0] trig_mask_sync1,    trig_mask_sync2;
-    reg [7:0]          chan_sel_sync1,     chan_sel_sync2;
-    reg [7:0]          probe_sel_sync1,   probe_sel_sync2;
-    reg [23:0]         decim_sync1,       decim_sync2;
-    reg [1:0]          trig_ext_sync1,    trig_ext_sync2;
-    reg                startup_arm_sync1, startup_arm_sync2;
-    reg [15:0]         trig_holdoff_sync1, trig_holdoff_sync2;
-    reg [15:0]         trig_delay_sync1,   trig_delay_sync2;
-    reg                rle_en_sync1,       rle_en_sync2;
-    reg [POST_CLK_W-1:0] rle_post_clks_sync1, rle_post_clks_sync2;
-    reg [3:0]          sq_mode_sync1, sq_mode_sync2;
+    // Settings snapshot on ARM / RESET (*_hold, jtag_clk) and its sample_clk
+    // copy (*_stage), narrowed to the bits used on the sample side.
+    reg [LEN_W-1:0]    pretrig_len_hold,  pretrig_len_stage;
+    reg [LEN_W-1:0]    posttrig_len_hold, posttrig_len_stage;
+    reg [1:0]          trig_mode_hold,    trig_mode_stage;
+    reg [SAMPLE_W-1:0] trig_value_hold,   trig_value_stage;
+    reg [SAMPLE_W-1:0] trig_mask_hold,    trig_mask_stage;
+    reg [7:0]          chan_sel_hold,     chan_sel_stage;
+    reg [7:0]          probe_sel_hold,   probe_sel_stage;
+    reg [23:0]         decim_hold,       decim_stage;
+    reg [1:0]          trig_ext_hold,    trig_ext_stage;
+    reg                startup_arm_hold, startup_arm_stage;
+    reg [15:0]         trig_holdoff_hold, trig_holdoff_stage;
+    reg [15:0]         trig_delay_hold,   trig_delay_stage;
+    reg                rle_en_hold,       rle_en_stage;
+    reg [POST_CLK_W-1:0] rle_post_clks_hold, rle_post_clks_stage;
+    reg [3:0]          sq_mode_hold, sq_mode_stage;
     // SQ_MODE 0 turns qualification off; 1..9 select compare mode 0..8
     // (EQ..CHANGED).  Other values turn it off too.
-    wire sq_mode_on = HAS_STOR_QUAL && (sq_mode_sync2 != 4'd0) && (sq_mode_sync2 <= 4'd9);
-    reg [SAMPLE_W-1:0] sq_value_sync1, sq_value_sync2;
-    reg [SAMPLE_W-1:0] sq_mask_sync1, sq_mask_sync2;
-    reg [31:0]         seq_cfg_sync1     [0:TRIG_STAGES-1];
-    reg [31:0]         seq_cfg_sync2     [0:TRIG_STAGES-1];
-    reg [SAMPLE_W-1:0] seq_value_a_sync1 [0:TRIG_STAGES-1];
-    reg [SAMPLE_W-1:0] seq_value_a_sync2 [0:TRIG_STAGES-1];
-    reg [SAMPLE_W-1:0] seq_mask_a_sync1  [0:TRIG_STAGES-1];
-    reg [SAMPLE_W-1:0] seq_mask_a_sync2  [0:TRIG_STAGES-1];
-    reg [SAMPLE_W-1:0] seq_value_b_sync1 [0:TRIG_STAGES-1];
-    reg [SAMPLE_W-1:0] seq_value_b_sync2 [0:TRIG_STAGES-1];
-    reg [SAMPLE_W-1:0] seq_mask_b_sync1  [0:TRIG_STAGES-1];
-    reg [SAMPLE_W-1:0] seq_mask_b_sync2  [0:TRIG_STAGES-1];
+    wire sq_mode_on = HAS_STOR_QUAL && (sq_mode_stage != 4'd0) && (sq_mode_stage <= 4'd9);
+    reg [SAMPLE_W-1:0] sq_value_hold, sq_value_stage;
+    reg [SAMPLE_W-1:0] sq_mask_hold, sq_mask_stage;
+    reg [31:0]         seq_cfg_hold     [0:TRIG_STAGES-1];
+    reg [31:0]         seq_cfg_stage     [0:TRIG_STAGES-1];
+    reg [SAMPLE_W-1:0] seq_value_a_hold [0:TRIG_STAGES-1];
+    reg [SAMPLE_W-1:0] seq_value_a_stage [0:TRIG_STAGES-1];
+    reg [SAMPLE_W-1:0] seq_mask_a_hold  [0:TRIG_STAGES-1];
+    reg [SAMPLE_W-1:0] seq_mask_a_stage  [0:TRIG_STAGES-1];
+    reg [SAMPLE_W-1:0] seq_value_b_hold [0:TRIG_STAGES-1];
+    reg [SAMPLE_W-1:0] seq_value_b_stage [0:TRIG_STAGES-1];
+    reg [SAMPLE_W-1:0] seq_mask_b_hold  [0:TRIG_STAGES-1];
+    reg [SAMPLE_W-1:0] seq_mask_b_stage  [0:TRIG_STAGES-1];
 
     // ---- Channel mux (sample_clk domain) -----------------------------------
     reg [7:0] chan_sel;   // active channel, latched on arm
@@ -678,10 +681,10 @@ module fcapz_ela #(
     reg [31:0]          datawin_chunk_q;
 
     // ---- Trigger logic (combinational) -------------------------------------
-    wire arm_pulse   = arm_toggle_sync1 ^ arm_toggle_sync2;
+    wire arm_pulse   = arm_toggle_sync3 ^ arm_toggle_sync4;
     wire startup_arm_pulse = startup_arm_pending;
     wire any_arm_pulse = arm_pulse | startup_arm_pulse;
-    wire reset_pulse = reset_toggle_sync1 ^ reset_toggle_sync2;
+    wire reset_pulse = reset_toggle_sync3 ^ reset_toggle_sync4;
     // An arm or soft reset restarts the capture on this edge and takes
     // priority over every decision of the capture already running.
     wire capture_restart = any_arm_pulse | reset_pulse;
@@ -694,10 +697,10 @@ module fcapz_ela #(
     // sample is captured, counted as pre-trigger history, compared, or used
     // as the previous sample of an edge.  Arms that keep the selection pay
     // nothing.
-    wire [7:0] chan_sel_next = (HAS_CHANNEL_MUX && chan_sel_sync2 < NUM_CHANNELS)
-                               ? chan_sel_sync2 : 8'h0;
-    wire [7:0] probe_sel_next = (HAS_PROBE_MUX && probe_sel_sync2 < PROBE_MUX_SLICES)
-                                ? probe_sel_sync2 : 8'h0;
+    wire [7:0] chan_sel_next = (HAS_CHANNEL_MUX && chan_sel_stage < NUM_CHANNELS)
+                               ? chan_sel_stage : 8'h0;
+    wire [7:0] probe_sel_next = (HAS_PROBE_MUX && probe_sel_stage < PROBE_MUX_SLICES)
+                                ? probe_sel_stage : 8'h0;
     wire arm_sel_change = HAS_PROBE_MUX   ? (probe_sel_next != probe_sel) :
                           HAS_CHANNEL_MUX ? (chan_sel_next != chan_sel) : 1'b0;
     wire sel_flush_start = any_arm_pulse && arm_sel_change;
@@ -708,7 +711,7 @@ module fcapz_ela #(
     // Run-length capture is on only without decimation and qualification,
     // so a count always means consecutive sample clocks.  Turning it on or
     // off on an arm changes what the history entries mean.
-    wire rle_active_next = HAS_RLE && rle_en_sync2 && (decim_sync2 == 24'h0) && !sq_mode_on;
+    wire rle_active_next = HAS_RLE && rle_en_stage && (decim_stage == 24'h0) && !sq_mode_on;
     wire arm_rle_change = HAS_RLE && (rle_active_next != rle_active);
     // Arms after which the rolling pre-arm history cannot be trusted.
     wire arm_voids_history = arm_sel_change || arm_sq_bubble || arm_rle_change;
@@ -1117,7 +1120,7 @@ module fcapz_ela #(
             // three-flop toggle synchronizer is still in flight.
             if (!rb_meta_sample_busy && (rb_meta_pending_sample || rb_meta_event_sample)) begin
                 rb_done_sample <= done;
-                rb_gen_sample <= {arm_toggle_sync2, reset_toggle_sync2};
+                rb_gen_sample <= {arm_toggle_sync4, reset_toggle_sync4};
                 rb_capture_len_sample <= capture_len;
                 rb_start_ptr_sample <= start_ptr;
                 for (rb_sample_i = 0; rb_sample_i < NUM_SEGMENTS; rb_sample_i = rb_sample_i + 1) begin
@@ -1177,115 +1180,154 @@ module fcapz_ela #(
     always @(posedge sample_clk or posedge sample_rst) begin
         if (sample_rst) begin
             arm_toggle_sync1   <= 1'b0; arm_toggle_sync2   <= 1'b0;
+            arm_toggle_sync3   <= 1'b0; arm_toggle_sync4   <= 1'b0;
             reset_toggle_sync1 <= 1'b0; reset_toggle_sync2 <= 1'b0;
+            reset_toggle_sync3 <= 1'b0; reset_toggle_sync4 <= 1'b0;
             startup_arm_pending <= (STARTUP_ARM != 0);
         end else begin
             arm_toggle_sync1   <= arm_toggle_jtag;
             arm_toggle_sync2   <= arm_toggle_sync1;
+            arm_toggle_sync3   <= arm_toggle_sync2;
+            arm_toggle_sync4   <= arm_toggle_sync3;
             reset_toggle_sync1 <= reset_toggle_jtag;
             reset_toggle_sync2 <= reset_toggle_sync1;
+            reset_toggle_sync3 <= reset_toggle_sync2;
+            reset_toggle_sync4 <= reset_toggle_sync3;
             if (reset_pulse)
-                startup_arm_pending <= startup_arm_sync2;
+                startup_arm_pending <= startup_arm_stage;
             else if (startup_arm_pulse)
                 startup_arm_pending <= 1'b0;
         end
     end
 
     // ---- CDC: config registers ---------------------------------------------
+    // A CTRL write that arms or soft-resets snapshots the settings into
+    // *_hold (jtag_clk), so a setting written after it does not reach that
+    // capture.  The toggle reaching sync2 copies the snapshot, unchanged
+    // since that write, into *_stage (sample_clk) one clock before the arm /
+    // reset pulse latches it: an ARM or RESET uses exactly the settings
+    // written before it, however slow sample_clk is.
+    wire cfg_snapshot = jtag_wr_en && jtag_addr == ADDR_CTRL &&
+                        (jtag_wdata[0] || jtag_wdata[1]);
+    wire cfg_stage_en = (arm_toggle_sync2 ^ arm_toggle_sync3) |
+                        (reset_toggle_sync2 ^ reset_toggle_sync3);
+    integer hi;
+    always @(posedge jtag_clk or posedge jtag_rst) begin
+        if (jtag_rst) begin
+            pretrig_len_hold  <= 0;
+            posttrig_len_hold <= 0;
+            trig_mode_hold    <= 0;
+            trig_value_hold   <= 0;
+            trig_mask_hold    <= 0;
+            chan_sel_hold     <= 0;
+            probe_sel_hold   <= 0;
+            decim_hold       <= 0;
+            trig_ext_hold    <= DEFAULT_TRIG_EXT_MODE;
+            startup_arm_hold <= (STARTUP_ARM != 0);
+            trig_holdoff_hold <= 0;
+            trig_delay_hold  <= 0;
+            rle_en_hold      <= 0;
+            rle_post_clks_hold <= 0;
+            sq_mode_hold     <= 0;
+            sq_value_hold    <= 0;
+            sq_mask_hold     <= 0;
+            for (hi = 0; hi < TRIG_STAGES; hi = hi + 1) begin
+                seq_cfg_hold[hi]     <= 32'h0;
+                seq_value_a_hold[hi] <= {SAMPLE_W{1'b0}};
+                seq_mask_a_hold[hi]  <= {SAMPLE_W{1'b0}};
+                seq_value_b_hold[hi] <= {SAMPLE_W{1'b0}};
+                seq_mask_b_hold[hi]  <= {SAMPLE_W{1'b0}};
+            end
+        end else if (cfg_snapshot) begin
+            pretrig_len_hold  <= jtag_pretrig_len[LEN_W-1:0];
+            posttrig_len_hold <= jtag_posttrig_len[LEN_W-1:0];
+            trig_mode_hold    <= jtag_trig_mode[1:0];
+            trig_value_hold   <= jtag_trig_value_w;
+            trig_mask_hold    <= jtag_trig_mask_w;
+            chan_sel_hold     <= HAS_CHANNEL_MUX ? jtag_chan_sel : 8'h0;
+            probe_sel_hold   <= HAS_PROBE_MUX ? jtag_probe_sel : 8'h0;
+            decim_hold       <= HAS_DECIM ? jtag_decim : 24'h0;
+            trig_ext_hold    <= HAS_EXT_TRIG ? jtag_trig_ext : 2'd0;
+            startup_arm_hold <= jtag_startup_arm;
+            trig_holdoff_hold <= jtag_trig_holdoff;
+            trig_delay_hold  <= jtag_trig_delay;
+            rle_en_hold      <= HAS_RLE && jtag_rle_ctrl[0];
+            rle_post_clks_hold <= HAS_RLE ? jtag_rle_post_clks : {POST_CLK_W{1'b0}};
+            sq_mode_hold     <= HAS_STOR_QUAL ? jtag_sq_mode[3:0] : 4'h0;
+            sq_value_hold    <= HAS_STOR_QUAL ? jtag_sq_value_w : {SAMPLE_W{1'b0}};
+            sq_mask_hold     <= HAS_STOR_QUAL ? jtag_sq_mask_w : {SAMPLE_W{1'b0}};
+            for (hi = 0; hi < TRIG_STAGES; hi = hi + 1) begin
+                if (HAS_SEQUENCER) begin
+                    seq_cfg_hold[hi]     <= jtag_seq_cfg[hi];
+                    seq_value_a_hold[hi] <= jtag_seq_value_a_w[hi];
+                    seq_mask_a_hold[hi]  <= jtag_seq_mask_a_w[hi];
+                end else begin
+                    seq_cfg_hold[hi]     <= 32'h0;
+                    seq_value_a_hold[hi] <= {SAMPLE_W{1'b0}};
+                    seq_mask_a_hold[hi]  <= {SAMPLE_W{1'b1}};
+                end
+                if (HAS_SEQUENCER && HAS_DUAL_COMPARE) begin
+                    seq_value_b_hold[hi] <= jtag_seq_value_b_w[hi];
+                    seq_mask_b_hold[hi]  <= jtag_seq_mask_b_w[hi];
+                end else begin
+                    seq_value_b_hold[hi] <= {SAMPLE_W{1'b0}};
+                    seq_mask_b_hold[hi]  <= {SAMPLE_W{1'b1}};
+                end
+            end
+        end
+    end
+
     integer si;
     always @(posedge sample_clk or posedge sample_rst) begin
         if (sample_rst) begin
-            pretrig_len_sync1  <= 0; pretrig_len_sync2  <= 0;
-            posttrig_len_sync1 <= 0; posttrig_len_sync2 <= 0;
-            trig_mode_sync1    <= 0; trig_mode_sync2    <= 0;
-            trig_value_sync1   <= 0; trig_value_sync2   <= 0;
-            trig_mask_sync1    <= 0; trig_mask_sync2    <= 0;
-            chan_sel_sync1     <= 0; chan_sel_sync2     <= 0;
-            probe_sel_sync1   <= 0; probe_sel_sync2   <= 0;
-            decim_sync1       <= 0; decim_sync2       <= 0;
-            trig_ext_sync1    <= DEFAULT_TRIG_EXT_MODE; trig_ext_sync2 <= DEFAULT_TRIG_EXT_MODE;
-            startup_arm_sync1 <= (STARTUP_ARM != 0); startup_arm_sync2 <= (STARTUP_ARM != 0);
-            trig_holdoff_sync1 <= 0; trig_holdoff_sync2 <= 0;
-            trig_delay_sync1  <= 0; trig_delay_sync2  <= 0;
-            rle_en_sync1      <= 0; rle_en_sync2      <= 0;
-            rle_post_clks_sync1 <= 0; rle_post_clks_sync2 <= 0;
-            sq_mode_sync1     <= 0; sq_mode_sync2     <= 0;
-            sq_value_sync1    <= 0; sq_value_sync2    <= 0;
-            sq_mask_sync1     <= 0; sq_mask_sync2     <= 0;
+            pretrig_len_stage  <= 0;
+            posttrig_len_stage <= 0;
+            trig_mode_stage    <= 0;
+            trig_value_stage   <= 0;
+            trig_mask_stage    <= 0;
+            chan_sel_stage     <= 0;
+            probe_sel_stage   <= 0;
+            decim_stage       <= 0;
+            trig_ext_stage <= DEFAULT_TRIG_EXT_MODE;
+            startup_arm_stage <= (STARTUP_ARM != 0);
+            trig_holdoff_stage <= 0;
+            trig_delay_stage  <= 0;
+            rle_en_stage      <= 0;
+            rle_post_clks_stage <= 0;
+            sq_mode_stage     <= 0;
+            sq_value_stage    <= 0;
+            sq_mask_stage     <= 0;
             for (si = 0; si < TRIG_STAGES; si = si + 1) begin
-                seq_cfg_sync1[si]     <= 32'h0;
-                seq_cfg_sync2[si]     <= 32'h0;
-                seq_value_a_sync1[si] <= {SAMPLE_W{1'b0}};
-                seq_value_a_sync2[si] <= {SAMPLE_W{1'b0}};
-                seq_mask_a_sync1[si]  <= {SAMPLE_W{1'b0}};
-                seq_mask_a_sync2[si]  <= {SAMPLE_W{1'b0}};
-                seq_value_b_sync1[si] <= {SAMPLE_W{1'b0}};
-                seq_value_b_sync2[si] <= {SAMPLE_W{1'b0}};
-                seq_mask_b_sync1[si]  <= {SAMPLE_W{1'b0}};
-                seq_mask_b_sync2[si]  <= {SAMPLE_W{1'b0}};
+                seq_cfg_stage[si]     <= 32'h0;
+                seq_value_a_stage[si] <= {SAMPLE_W{1'b0}};
+                seq_mask_a_stage[si]  <= {SAMPLE_W{1'b0}};
+                seq_value_b_stage[si] <= {SAMPLE_W{1'b0}};
+                seq_mask_b_stage[si]  <= {SAMPLE_W{1'b0}};
             end
-        end else begin
-            pretrig_len_sync1  <= jtag_pretrig_len[LEN_W-1:0];
-            pretrig_len_sync2  <= pretrig_len_sync1;
-            posttrig_len_sync1 <= jtag_posttrig_len[LEN_W-1:0];
-            posttrig_len_sync2 <= posttrig_len_sync1;
-            trig_mode_sync1    <= jtag_trig_mode[1:0];
-            trig_mode_sync2    <= trig_mode_sync1;
-            trig_value_sync1   <= jtag_trig_value_w;
-            trig_value_sync2   <= trig_value_sync1;
-            trig_mask_sync1    <= jtag_trig_mask_w;
-            trig_mask_sync2    <= trig_mask_sync1;
-            chan_sel_sync1     <= HAS_CHANNEL_MUX ? jtag_chan_sel : 8'h0;
-            chan_sel_sync2     <= HAS_CHANNEL_MUX ? chan_sel_sync1 : 8'h0;
-            probe_sel_sync1   <= HAS_PROBE_MUX ? jtag_probe_sel : 8'h0;
-            probe_sel_sync2   <= HAS_PROBE_MUX ? probe_sel_sync1 : 8'h0;
-            decim_sync1       <= HAS_DECIM ? jtag_decim : 24'h0;
-            decim_sync2       <= HAS_DECIM ? decim_sync1 : 24'h0;
-            trig_ext_sync1    <= HAS_EXT_TRIG ? jtag_trig_ext : 2'd0;
-            trig_ext_sync2    <= HAS_EXT_TRIG ? trig_ext_sync1 : 2'd0;
-            startup_arm_sync1 <= jtag_startup_arm;
-            startup_arm_sync2 <= startup_arm_sync1;
-            trig_holdoff_sync1 <= jtag_trig_holdoff;
-            trig_holdoff_sync2 <= trig_holdoff_sync1;
-            trig_delay_sync1  <= jtag_trig_delay;
-            trig_delay_sync2  <= trig_delay_sync1;
-            rle_en_sync1      <= HAS_RLE && jtag_rle_ctrl[0];
-            rle_en_sync2      <= rle_en_sync1;
-            rle_post_clks_sync1 <= HAS_RLE ? jtag_rle_post_clks : {POST_CLK_W{1'b0}};
-            rle_post_clks_sync2 <= rle_post_clks_sync1;
-            sq_mode_sync1     <= HAS_STOR_QUAL ? jtag_sq_mode[3:0] : 4'h0;
-            sq_mode_sync2     <= HAS_STOR_QUAL ? sq_mode_sync1 : 4'h0;
-            sq_value_sync1    <= HAS_STOR_QUAL ? jtag_sq_value_w : {SAMPLE_W{1'b0}};
-            sq_value_sync2    <= HAS_STOR_QUAL ? sq_value_sync1 : {SAMPLE_W{1'b0}};
-            sq_mask_sync1     <= HAS_STOR_QUAL ? jtag_sq_mask_w : {SAMPLE_W{1'b0}};
-            sq_mask_sync2     <= HAS_STOR_QUAL ? sq_mask_sync1 : {SAMPLE_W{1'b0}};
+        end else if (cfg_stage_en) begin
+            pretrig_len_stage <= pretrig_len_hold;
+            posttrig_len_stage <= posttrig_len_hold;
+            trig_mode_stage <= trig_mode_hold;
+            trig_value_stage <= trig_value_hold;
+            trig_mask_stage <= trig_mask_hold;
+            chan_sel_stage <= chan_sel_hold;
+            probe_sel_stage <= probe_sel_hold;
+            decim_stage <= decim_hold;
+            trig_ext_stage <= trig_ext_hold;
+            startup_arm_stage <= startup_arm_hold;
+            trig_holdoff_stage <= trig_holdoff_hold;
+            trig_delay_stage <= trig_delay_hold;
+            rle_en_stage <= rle_en_hold;
+            rle_post_clks_stage <= rle_post_clks_hold;
+            sq_mode_stage <= sq_mode_hold;
+            sq_value_stage <= sq_value_hold;
+            sq_mask_stage <= sq_mask_hold;
             for (si = 0; si < TRIG_STAGES; si = si + 1) begin
-                if (HAS_SEQUENCER) begin
-                    seq_cfg_sync1[si]     <= jtag_seq_cfg[si];
-                    seq_cfg_sync2[si]     <= seq_cfg_sync1[si];
-                    seq_value_a_sync1[si] <= jtag_seq_value_a_w[si];
-                    seq_value_a_sync2[si] <= seq_value_a_sync1[si];
-                    seq_mask_a_sync1[si]  <= jtag_seq_mask_a_w[si];
-                    seq_mask_a_sync2[si]  <= seq_mask_a_sync1[si];
-                end else begin
-                    seq_cfg_sync1[si]     <= 32'h0;
-                    seq_cfg_sync2[si]     <= 32'h0;
-                    seq_value_a_sync1[si] <= {SAMPLE_W{1'b0}};
-                    seq_value_a_sync2[si] <= {SAMPLE_W{1'b0}};
-                    seq_mask_a_sync1[si]  <= {SAMPLE_W{1'b1}};
-                    seq_mask_a_sync2[si]  <= {SAMPLE_W{1'b1}};
-                end
-                if (HAS_SEQUENCER && HAS_DUAL_COMPARE) begin
-                    seq_value_b_sync1[si] <= jtag_seq_value_b_w[si];
-                    seq_value_b_sync2[si] <= seq_value_b_sync1[si];
-                    seq_mask_b_sync1[si]  <= jtag_seq_mask_b_w[si];
-                    seq_mask_b_sync2[si]  <= seq_mask_b_sync1[si];
-                end else begin
-                    seq_value_b_sync1[si] <= {SAMPLE_W{1'b0}};
-                    seq_value_b_sync2[si] <= {SAMPLE_W{1'b0}};
-                    seq_mask_b_sync1[si]  <= {SAMPLE_W{1'b1}};
-                    seq_mask_b_sync2[si]  <= {SAMPLE_W{1'b1}};
-                end
+                seq_cfg_stage[si] <= seq_cfg_hold[si];
+                seq_value_a_stage[si] <= seq_value_a_hold[si];
+                seq_mask_a_stage[si] <= seq_mask_a_hold[si];
+                seq_value_b_stage[si] <= seq_value_b_hold[si];
+                seq_mask_b_stage[si] <= seq_mask_b_hold[si];
             end
         end
     end
@@ -1362,61 +1404,61 @@ module fcapz_ela #(
                 seq_is_final[si]     <= 1'b0;
             end
         end else if (any_arm_pulse) begin
-            pretrig_len      <= pretrig_len_sync2;
-            posttrig_len     <= posttrig_len_sync2;
-            trig_value       <= trig_value_sync2;
-            trig_mask        <= trig_mask_sync2;
+            pretrig_len      <= pretrig_len_stage;
+            posttrig_len     <= posttrig_len_stage;
+            trig_value       <= trig_value_stage;
+            trig_mask        <= trig_mask_stage;
             // Stage-0 compare modes
-            if (HAS_SEQUENCER && seq_cfg_sync2[0][9:0] != 10'd0) begin
-                trig_cmp_mode_a <= seq_cfg_sync2[0][3:0];
-                trig_cmp_mode_b <= HAS_DUAL_COMPARE ? seq_cfg_sync2[0][7:4] : 4'd0;
-                trig_combine    <= HAS_DUAL_COMPARE ? seq_cfg_sync2[0][9:8] : 2'd0;
+            if (HAS_SEQUENCER && seq_cfg_stage[0][9:0] != 10'd0) begin
+                trig_cmp_mode_a <= seq_cfg_stage[0][3:0];
+                trig_cmp_mode_b <= HAS_DUAL_COMPARE ? seq_cfg_stage[0][7:4] : 4'd0;
+                trig_combine    <= HAS_DUAL_COMPARE ? seq_cfg_stage[0][9:8] : 2'd0;
             end else begin
-                trig_cmp_mode_a <= trig_mode_sync2[1] ? 4'd8 : 4'd0;
-                trig_cmp_mode_b <= (HAS_DUAL_COMPARE && trig_mode_sync2 == 2'b11) ? 4'd8 : 4'd0;
-                trig_combine    <= (HAS_DUAL_COMPARE && trig_mode_sync2 == 2'b11) ? 2'd3 : 2'd0;
+                trig_cmp_mode_a <= trig_mode_stage[1] ? 4'd8 : 4'd0;
+                trig_cmp_mode_b <= (HAS_DUAL_COMPARE && trig_mode_stage == 2'b11) ? 4'd8 : 4'd0;
+                trig_combine    <= (HAS_DUAL_COMPARE && trig_mode_stage == 2'b11) ? 2'd3 : 2'd0;
             end
             trig_value_b     <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
-                                 ? seq_value_b_sync2[0] : {SAMPLE_W{1'b0}};
+                                 ? seq_value_b_stage[0] : {SAMPLE_W{1'b0}};
             trig_mask_b      <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
-                                 ? seq_mask_b_sync2[0] : {SAMPLE_W{1'b1}};
+                                 ? seq_mask_b_stage[0] : {SAMPLE_W{1'b1}};
             // Channel select (clamped to valid range)
             chan_sel         <= chan_sel_next;
             // Probe mux select (clamped when enabled)
             probe_sel        <= probe_sel_next;
             // Storage qualification
             sq_enable        <= sq_mode_on;
-            sq_cmp_mode      <= sq_mode_on ? sq_mode_sync2 - 4'd1 : 4'h0;
-            sq_value         <= HAS_STOR_QUAL ? sq_value_sync2 : {SAMPLE_W{1'b0}};
-            sq_mask          <= HAS_STOR_QUAL ? sq_mask_sync2 : {SAMPLE_W{1'b0}};
+            sq_cmp_mode      <= sq_mode_on ? sq_mode_stage - 4'd1 : 4'h0;
+            sq_value         <= HAS_STOR_QUAL ? sq_value_stage : {SAMPLE_W{1'b0}};
+            sq_mask          <= HAS_STOR_QUAL ? sq_mask_stage : {SAMPLE_W{1'b0}};
             rle_active       <= rle_active_next;
-            rle_post_clks    <= rle_post_clks_sync2;
-            post_clk_en      <= rle_active_next && (rle_post_clks_sync2 != {POST_CLK_W{1'b0}});
-            post_clk_one     <= (rle_post_clks_sync2 == {{(POST_CLK_W-1){1'b0}}, 1'b1});
+            rle_post_clks    <= rle_post_clks_stage;
+            post_clk_en      <= rle_active_next && (rle_post_clks_stage != {POST_CLK_W{1'b0}});
+            post_clk_one     <= (rle_post_clks_stage == {{(POST_CLK_W-1){1'b0}}, 1'b1});
             // Phase 1: decimation
-            decim_ratio      <= HAS_DECIM ? decim_sync2 : 24'h0;
+            decim_ratio      <= HAS_DECIM ? decim_stage : 24'h0;
             // Phase 2: external trigger
-            ext_trig_mode    <= HAS_EXT_TRIG ? trig_ext_sync2 : 2'd0;
+            ext_trig_mode    <= HAS_EXT_TRIG ? trig_ext_stage : 2'd0;
             // Trigger delay (sample clocks) — latched on arm
-            trig_delay       <= trig_delay_sync2;
+            trig_delay       <= trig_delay_stage;
             // Sequencer stages
             for (si = 0; si < TRIG_STAGES; si = si + 1) begin
-                seq_mode_a[si]       <= HAS_SEQUENCER ? seq_cfg_sync2[si][3:0] : 4'd0;
+                seq_mode_a[si]       <= HAS_SEQUENCER ? seq_cfg_stage[si][3:0] : 4'd0;
                 seq_mode_b[si]       <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
-                                         ? seq_cfg_sync2[si][7:4] : 4'd0;
+                                         ? seq_cfg_stage[si][7:4] : 4'd0;
                 seq_combine[si]      <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
-                                         ? seq_cfg_sync2[si][9:8] : 2'd0;
+                                         ? seq_cfg_stage[si][9:8] : 2'd0;
                 seq_next_state[si]   <= HAS_SEQUENCER
-                                         ? seq_cfg_sync2[si][10 +: SEQ_STATE_W]
+                                         ? seq_cfg_stage[si][10 +: SEQ_STATE_W]
                                          : {SEQ_STATE_W{1'b0}};
-                seq_is_final[si]     <= HAS_SEQUENCER ? seq_cfg_sync2[si][12] : 1'b0;
-                seq_count_target[si] <= HAS_SEQUENCER ? seq_cfg_sync2[si][31:16] : 16'h0;
-                seq_value_a[si]      <= HAS_SEQUENCER ? seq_value_a_sync2[si] : {SAMPLE_W{1'b0}};
-                seq_mask_a[si]       <= HAS_SEQUENCER ? seq_mask_a_sync2[si] : {SAMPLE_W{1'b1}};
+                seq_is_final[si]     <= HAS_SEQUENCER ? seq_cfg_stage[si][12] : 1'b0;
+                seq_count_target[si] <= HAS_SEQUENCER ? seq_cfg_stage[si][31:16] : 16'h0;
+                seq_value_a[si]      <= HAS_SEQUENCER ? seq_value_a_stage[si] : {SAMPLE_W{1'b0}};
+                seq_mask_a[si]       <= HAS_SEQUENCER ? seq_mask_a_stage[si] : {SAMPLE_W{1'b1}};
                 seq_value_b[si]      <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
-                                         ? seq_value_b_sync2[si] : {SAMPLE_W{1'b0}};
+                                         ? seq_value_b_stage[si] : {SAMPLE_W{1'b0}};
                 seq_mask_b[si]       <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
-                                         ? seq_mask_b_sync2[si] : {SAMPLE_W{1'b1}};
+                                         ? seq_mask_b_stage[si] : {SAMPLE_W{1'b1}};
             end
         end
     end
@@ -1450,7 +1492,7 @@ module fcapz_ela #(
     // ---- Capture state machine ---------------------------------------------
     wire [LEN_W-1:0] post_store_limit = posttrig_len;
     wire [LEN_W:0] config_capture_len =
-        {1'b0, pretrig_len_sync2} + {1'b0, posttrig_len_sync2} + {{LEN_W{1'b0}}, 1'b1};
+        {1'b0, pretrig_len_stage} + {1'b0, posttrig_len_stage} + {{LEN_W{1'b0}}, 1'b1};
     wire [LEN_W:0] capture_len_next =
         {1'b0, pretrig_len} + {1'b0, posttrig_len} + {{LEN_W{1'b0}}, 1'b1};
     wire trigger_commit_now = armed && !done && !triggered && !capture_restart &&
@@ -1700,10 +1742,10 @@ module fcapz_ela #(
                     pre_count <= {LEN_W{1'b0}};
                 seq_state   <= {SEQ_STATE_W{1'b0}};
                 seq_counter <= 16'h0;
-                trig_holdoff <= trig_holdoff_sync2;
-                trig_holdoff_active <= (trig_holdoff_sync2 != 16'h0);
-                trig_holdoff_count  <= (trig_holdoff_sync2 != 16'h0)
-                    ? (trig_holdoff_sync2 - 16'h1) : 16'h0;
+                trig_holdoff <= trig_holdoff_stage;
+                trig_holdoff_active <= (trig_holdoff_stage != 16'h0);
+                trig_holdoff_count  <= (trig_holdoff_stage != 16'h0)
+                    ? (trig_holdoff_stage - 16'h1) : 16'h0;
                 trig_delay_pending <= 1'b0;
                 trig_delay_count   <= 16'h0;
                 cur_segment <= {SEG_IDX_W{1'b0}};
