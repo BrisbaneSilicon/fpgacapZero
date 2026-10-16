@@ -1090,8 +1090,8 @@ module fcapz_ela #(
     end
 
     // ---- CDC: config registers ---------------------------------------------
-    integer si;
-    always @(posedge sample_clk or posedge sample_rst) begin
+    always @(posedge sample_clk or posedge sample_rst) begin : cdc_cfg
+        integer si;  // block-local: a shared one gets a driver per block
         if (sample_rst) begin
             pretrig_len_sync1  <= 0; pretrig_len_sync2  <= 0;
             posttrig_len_sync1 <= 0; posttrig_len_sync2 <= 0;
@@ -1217,7 +1217,8 @@ module fcapz_ela #(
     endgenerate
 
     // ---- Latch config on arm -----------------------------------------------
-    always @(posedge sample_clk or posedge sample_rst) begin
+    always @(posedge sample_clk or posedge sample_rst) begin : latch_cfg
+        integer si;
         if (sample_rst) begin
             pretrig_len      <= 0;
             posttrig_len     <= 0;
