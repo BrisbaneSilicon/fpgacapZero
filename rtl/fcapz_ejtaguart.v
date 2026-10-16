@@ -271,6 +271,21 @@ module fcapz_ejtaguart #(
     // ---- Capture data mux ----------------------------------------------------
     wire [7:0] capture_rx_byte = config_valid_reg ? config_byte_reg : rx_byte_reg;
 
+    // ---- Sticky error flags (set from uart_clk domain, synced to TCK) --------
+    reg rx_overflow_uart;
+    reg frame_err_uart;
+
+    // Sync into TCK domain
+    (* ASYNC_REG = "TRUE" *) reg rx_overflow_sync1, rx_overflow_sync2;
+    (* ASYNC_REG = "TRUE" *) reg frame_err_sync1, frame_err_sync2;
+
+    always @(posedge tck) begin
+        rx_overflow_sync1 <= rx_overflow_uart;
+        rx_overflow_sync2 <= rx_overflow_sync1;
+        frame_err_sync1   <= frame_err_uart;
+        frame_err_sync2   <= frame_err_sync1;
+    end
+
     // ---- TCK: CAPTURE / SHIFT / UPDATE logic ---------------------------------
     always @(posedge tck) begin
         // Default: clear single-cycle pulses
@@ -357,21 +372,6 @@ module fcapz_ejtaguart #(
                 endcase
             end
         end
-    end
-
-    // ---- Sticky error flags (set from uart_clk domain, synced to TCK) --------
-    reg rx_overflow_uart;
-    reg frame_err_uart;
-
-    // Sync into TCK domain
-    (* ASYNC_REG = "TRUE" *) reg rx_overflow_sync1, rx_overflow_sync2;
-    (* ASYNC_REG = "TRUE" *) reg frame_err_sync1, frame_err_sync2;
-
-    always @(posedge tck) begin
-        rx_overflow_sync1 <= rx_overflow_uart;
-        rx_overflow_sync2 <= rx_overflow_sync1;
-        frame_err_sync1   <= frame_err_uart;
-        frame_err_sync2   <= frame_err_sync1;
     end
 
     // ========================================================================
