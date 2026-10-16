@@ -146,19 +146,26 @@ jobs:
       - name: Build the manual
         run: mkdocs build --strict
 
-  # ── 4. Strict RTL lint (Verilator) ───────────────────────────────
+  # ── 4. Strict RTL lint (Verilator + yosys pre-synthesis check) ───
+  # Pinned OSS CAD Suite, not apt: Ubuntu's Verilator is too old to report
+  # MULTIDRIVENPROC, and the yosys check should match current ASIC flows.
   lint-rtl:
-    name: Strict RTL lint (Verilator)
+    name: Strict RTL lint (Verilator, yosys check)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Install Verilator
-        run: sudo apt-get install -y verilator
+      - name: Install Verilator and yosys (OSS CAD Suite)
+        uses: YosysHQ/setup-oss-cad-suite@v4
+        with:
+          version: "2026-08-10"
+          github-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - name: Run strict Verilator RTL lint
         run: python sim/run_verilator_lint.py --self-test
+      - name: Run yosys pre-synthesis check (LibreLane's pre_synth_chk)
+        run: python sim/run_yosys_check.py --self-test
 
   # -- 5. Verilog/VHDL static parity gate ------------------------------------
   hdl-parity:
