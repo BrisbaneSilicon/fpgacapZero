@@ -166,6 +166,12 @@ jobs:
         run: python sim/run_verilator_lint.py --self-test
       - name: Run yosys pre-synthesis check (LibreLane's pre_synth_chk)
         run: python sim/run_yosys_check.py --self-test
+      # The suite's Icarus is newer than apt's (used by the sim jobs) and
+      # rejects a signal used before its declaration.
+      - name: Elaborate the RTL with the suite's Icarus
+        run: |
+          iverilog -V 2>&1 | sed -n 1p
+          python sim/run_sim.py --lint-only
 
   # -- 5. Verilog/VHDL static parity gate ------------------------------------
   hdl-parity:
