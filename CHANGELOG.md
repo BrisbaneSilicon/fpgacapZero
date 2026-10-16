@@ -76,6 +76,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **CI — RTL lint now includes yosys's pre-synthesis check.** A new
+  `sim/run_yosys_check.py` runs `proc` then `check` (LibreLane's
+  `pre_synth_chk` step) on every Verilator lint target and every Verilog
+  parameter set in the parity manifests, and fails on any warning. Its
+  `--self-test` proves it rejects a loop index shared by two clocked blocks.
+  The `lint-rtl` job now gets Verilator and yosys from a pinned OSS CAD Suite;
+  Ubuntu's Verilator was too old to report `MULTIDRIVENPROC`. The job also
+  elaborates the RTL with the suite's newer Icarus (`run_sim.py --lint-only`),
+  which rejects a signal used before its declaration.
+
 - **DE25-Nano — `trigger_out` is now observable from the host.** Both DE25
   tops count the clocks the ELA `trigger_out` is high and expose the count on
   EIO inputs 15:8 (cleared by EIO output 7), so the EIO there is now 16 inputs
@@ -155,6 +165,28 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   directly must add 1 to the compare mode. `AxiMonitor.beat_storage_qual()` now
   returns mode 2. Both HDLs. The DE25-Nano ELA now builds with `STOR_QUAL=1`,
   and its hardware tests cover modes 0, 1 and 2.
+
+- **ELA — the sequencer loop index had two drivers before optimization.** One
+  module-level `integer si` was the loop index of two clocked blocks, so right
+  after `proc` yosys `check` reported 32 conflicting drivers, and recent
+  Verilator releases flag `MULTIDRIVENPROC`. Optimization removed the dead flops, so FPGA netlists
+  were correct, but flows that gate on the pre-synthesis check (LibreLane, Tiny
+  Tapeout) stopped at synthesis. Each block now declares its own index; the
+  synthesized netlist is unchanged.
+
+- **EJTAG-UART — yosys could not read the core.** The simulation-only baud
+  check calls `$error`/`$warning` with run-time arguments in an `initial`
+  block, which yosys rejects, so yosys-based flows stopped at read. Synthesis
+  now skips that block (`` `ifndef SYNTHESIS ``); simulators still run it.
+
+- **ELA (Gowin) — the unused user chain's TDO was undriven.** Only the
+  selected chain's TDO had a driver, leaving the other `GW_JTAG` input
+  floating. It is now tied low. Both HDLs.
+
+- **EJTAG-AXI and EJTAG-UART — newer Icarus could not elaborate them.** Each
+  used registers before declaring them, which Icarus 14 rejects. The
+  declarations (and the UART's error-flag synchronizer) now come first; the
+  logic is unchanged.
 
 - **ELA — `trigger_out` stayed high through the trigger delay.** With
   `trigger_delay > 0` a hit still present during the countdown kept

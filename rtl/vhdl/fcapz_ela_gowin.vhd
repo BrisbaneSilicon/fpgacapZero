@@ -70,6 +70,9 @@ begin
         report "fcapz_ela_gowin CHAIN must be 1 or 2"
         severity failure;
 
+    -- The other user chain has no register interface; drive its TDO low.
+    tap_tdo(1 - CHAIN_IDX) <= '0';
+
     u_tap_ctrl : entity work.jtag_tap_gowin
         port map (
             sysclk => clk,
