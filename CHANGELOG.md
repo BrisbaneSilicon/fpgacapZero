@@ -64,7 +64,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   parameter set in the parity manifests, and fails on any warning. Its
   `--self-test` proves it rejects a loop index shared by two clocked blocks.
   The `lint-rtl` job now gets Verilator and yosys from a pinned OSS CAD Suite;
-  Ubuntu's Verilator was too old to report `MULTIDRIVENPROC`.
+  Ubuntu's Verilator was too old to report `MULTIDRIVENPROC`. The job also
+  elaborates the RTL with the suite's newer Icarus (`run_sim.py --lint-only`),
+  which rejects a signal used before its declaration.
 
 - **DE25-Nano — `trigger_out` is now observable from the host.** Both DE25
   tops count the clocks the ELA `trigger_out` is high and expose the count on
@@ -137,6 +139,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **ELA (Gowin) — the unused user chain's TDO was undriven.** Only the
   selected chain's TDO had a driver, leaving the other `GW_JTAG` input
   floating. It is now tied low. Both HDLs.
+
+- **EJTAG-AXI and EJTAG-UART — newer Icarus could not elaborate them.** Each
+  used registers before declaring them, which Icarus 14 rejects. The
+  declarations (and the UART's error-flag synchronizer) now come first; the
+  logic is unchanged.
 
 - **ELA — `trigger_out` stayed high through the trigger delay.** With
   `trigger_delay > 0` a hit still present during the countdown kept
