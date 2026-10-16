@@ -63,21 +63,32 @@ def manifest_runs() -> list[CheckRun]:
     return runs
 
 
+def quoted(path: Path) -> str:
+    """A path as one yosys script argument, even when it contains spaces."""
+    return f'"{path.as_posix()}"'
+
+
+def repo_relative(path: Path) -> str:
+    return path.relative_to(ROOT).as_posix()
+
+
 def yosys_script(run: CheckRun, report: Path) -> str:
     stubs = [s for s in run.sources if s in STUBS]
     rtl = [s for s in run.sources if s not in STUBS]
     lines = []
     if stubs:
         # Vendor primitive stubs stand in for black boxes; check their users only.
-        lines.append("read_verilog -lib " + " ".join(s.as_posix() for s in stubs))
-    incdirs = " ".join(f"-I{d.as_posix()}" for d in LIBDIRS)
-    lines.append(f"read_verilog -sv {incdirs} " + " ".join(s.as_posix() for s in rtl))
+        lines.append("read_verilog -lib " + " ".join(quoted(s) for s in stubs))
+    # yosys keeps the quotes on option arguments (-I, -libdir), so pass those
+    # dirs relative to the repository root (yosys runs there): no spaces.
+    incdirs = " ".join(f"-I{repo_relative(d)}" for d in LIBDIRS)
+    lines.append(f"read_verilog -sv {incdirs} " + " ".join(quoted(s) for s in rtl))
     if run.params:
         sets = "".join(f" -set {k} {v}" for k, v in run.params.items())
         lines.append(f"chparam{sets} {run.top}")
     hierarchy = f"hierarchy -check -top {run.top}"
-    hierarchy += "".join(f" -libdir {d.as_posix()}" for d in LIBDIRS)
-    lines += [hierarchy, "proc", f"tee -q -o {report.as_posix()} check"]
+    hierarchy += "".join(f" -libdir {repo_relative(d)}" for d in LIBDIRS)
+    lines += [hierarchy, "proc", f"tee -q -o {quoted(report)} check"]
     return "\n".join(lines) + "\n"
 
 
