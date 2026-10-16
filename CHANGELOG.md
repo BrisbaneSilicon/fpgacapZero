@@ -113,6 +113,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **ELA — the sequencer loop index had two drivers before optimization.** One
+  module-level `integer si` was the loop index of two clocked blocks, so right
+  after `proc` yosys `check` reported 32 conflicting drivers, and recent
+  Verilator releases flag `MULTIDRIVENPROC`. Optimization removed the dead flops, so FPGA netlists
+  were correct, but flows that gate on the pre-synthesis check (LibreLane, Tiny
+  Tapeout) stopped at synthesis. Each block now declares its own index; the
+  synthesized netlist is unchanged.
+
 - **ELA — `trigger_out` stayed high through the trigger delay.** With
   `trigger_delay > 0` a hit still present during the countdown kept
   `trigger_out` asserted, for up to `trigger_delay + 1` clocks, and a hit that
