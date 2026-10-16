@@ -1327,6 +1327,21 @@ class RunLengthTests(unittest.TestCase):
         self.assertEqual(vcd_simulation_times(plain), [0, 1])
         self.assertEqual(expand_run_lengths(plain), [5, 6])
 
+    def test_vcd_keeps_the_last_run_length(self):
+        analyzer = Analyzer(RunLengthTransport())
+        cfg = self._cfg(rle=True)
+        one = CaptureResult(config=cfg, samples=[1, 2], run_lengths=[2, 10])
+        self.assertTrue(analyzer.export_vcd_text(one).endswith("#2\nb00000010 s\n#12\n"))
+        segments = [
+            CaptureResult(config=cfg, samples=[1, 2], run_lengths=[2, 10], segment=0),
+            CaptureResult(config=cfg, samples=[3], run_lengths=[5], segment=1),
+        ]
+        text = analyzer.export_vcd_text_segments(segments)
+        # Segment 1 starts where segment 0's last run ends, and the dump ends
+        # where segment 1's run does.
+        self.assertIn("#12\nb1 t\n", text)
+        self.assertTrue(text.endswith("#17\n"))
+
     def test_exports_carry_the_run_lengths(self):
         analyzer = Analyzer(RunLengthTransport())
         result = CaptureResult(

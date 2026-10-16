@@ -360,6 +360,15 @@ def vcd_simulation_times(result: CaptureResult) -> list[int]:
     return entry_start_clocks(result)
 
 
+def _last_entry_clocks(result: CaptureResult) -> int:
+    """Clocks the last entry stands for: its run length on a run-length
+    capture, else one."""
+    runs = result.run_lengths
+    if runs and len(runs) == len(result.samples):
+        return int(runs[-1])
+    return 1
+
+
 def _selected_transaction(method):
     @wraps(method)
     def wrapper(self, *args, **kwargs):
@@ -1357,6 +1366,9 @@ class Analyzer:
             if ts_var_id and i < len(result.timestamps):
                 ts_bits = format(result.timestamps[i], f"0{ts_w}b")
                 lines.append(f"b{ts_bits} {ts_var_id}")
+        if sim_times and _last_entry_clocks(result) > 1:
+            # Close the dump where the last run ends, so its length survives.
+            lines.append(f"#{sim_times[-1] + _last_entry_clocks(result)}")
         return "\n".join(lines) + "\n"
 
     def write_vcd(self, result: CaptureResult, out_path: str) -> None:
@@ -1426,7 +1438,10 @@ class Analyzer:
                     val = (sample >> lsb) & ((1 << width) - 1)
                     lines.append(f"b{val:0{width}b} {var_id}")
             if sim_times:
-                offset += sim_times[-1] + 1
+                # The next segment starts where this one's last entry ends.
+                offset += sim_times[-1] + _last_entry_clocks(result)
+        if results[-1].samples and _last_entry_clocks(results[-1]) > 1:
+            lines.append(f"#{offset}")
         return "\n".join(lines) + "\n"
 
     def capture_continuous(

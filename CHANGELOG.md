@@ -16,8 +16,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `fcapz capture --rle`, the RPC `rle` field, or a checkbox in the GUI and web
   interface. Results gain `run_lengths`; VCD, the previews and the web viewer
   place entries at their start clocks, and `expand_run_lengths()` restores one
-  sample per clock. Pre/post-trigger windows count entries. Counts read back on
-  the timestamp burst lane (`BURST_PTR[31:30]=2'b11`) or the USER1 timestamp
+  sample per clock; a VCD ends where the last run does. Pre/post-trigger
+  windows count entries. Counts read back on the timestamp burst lane (`BURST_PTR[31:30]=2'b11`) or the USER1 timestamp
   window. New registers `RLE_CTRL` (0x00A8) and `RLE_W` (0x00CC). An optional
   post-trigger clock limit (`RLE_POST_CLKS`, 0x0090; `CaptureConfig.post_clocks`,
   `--post-clocks`, RPC `post_clocks`, GUI and web fields) also ends the window
