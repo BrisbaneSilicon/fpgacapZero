@@ -90,6 +90,9 @@ module fcapz_ela_gowin #(
         end
     endgenerate
 
+    // The other user chain has no register interface; drive its TDO low.
+    assign tap_tdo[1 - CHAIN_IDX] = 1'b0;
+
     // Gowin exposes only one user chain here, so USER2 burst readout is not
     // instantiated. Keep the core burst interface tied off; USER1 readback
     // remains available for samples and timestamps.
