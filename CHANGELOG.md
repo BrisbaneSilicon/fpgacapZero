@@ -9,6 +9,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **MCP — run-length captures and the storage-qualification modes.** The
+  capture `config` takes `rle` and `post_clocks`, and `stor_qual_mode` is now
+  the enum `0`/`1`/`2` (off, store on match, store on no match) in the
+  published schema. On a run-length capture each sample record and search
+  match carries `clock` and `run_length`, and a burst's `length` counts
+  clocks, so a stored entry is never read as one clock.
+
 - **MCP — authenticated HTTP transport.** `fcapz-mcp --transport http` serves
   streamable HTTP at `/mcp` for a remote bench. Every request needs
   `Authorization: Bearer <token>`, with the token taken from

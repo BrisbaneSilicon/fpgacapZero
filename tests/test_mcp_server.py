@@ -1639,6 +1639,8 @@ class TypedToolSchemaTests(unittest.TestCase):
         self.assertEqual(
             config["trigger_mode"]["enum"], ["value_match", "edge_detect", "both"]
         )
+        self.assertEqual(config["stor_qual_mode"]["enum"], [0, 1, 2])
+        self.assertEqual(config["rle"]["type"], "boolean")
         # Bit vectors must still accept a base-prefixed string: a value wider
         # than 53 bits cannot survive a JSON number.
         self.assertIn(
@@ -2357,6 +2359,7 @@ class CaptureSamplePagingTests(unittest.TestCase):
                 "samples": [],
                 "segments": None,
                 "fields": None,
+                "run_length_capture": False,
             },
         )
 
@@ -3449,6 +3452,102 @@ class BackendFailureCodeTests(unittest.TestCase):
 
     def test_a_programming_error_in_the_same_path_stays_internal(self):
         self.assertEqual(self._code(TypeError("bad operand")), "internal")
+
+
+class RunLengthCaptureTests(unittest.TestCase):
+    """A run-length entry stands for many clocks; pages and searches say so."""
+
+    # low nibble "lo" bits 0..3, "hi" bits 4..7.
+    VALUES = [0x1A, 0x2A, 0x0B, 0x0A]
+    RUNS = [3, 2, 1, 4]
+
+    def _payload(self, values=None, runs=None):
+        values = self.VALUES if values is None else values
+        runs = self.RUNS if runs is None else runs
+        return {
+            "ok": True,
+            "format": "json",
+            "probes": [
+                {"name": "lo", "width": 4, "lsb": 0},
+                {"name": "hi", "width": 4, "lsb": 4},
+            ],
+            "result": {
+                "sample_width": 8,
+                "pretrigger": 1,
+                "posttrigger": len(values) - 2,
+                "samples": [{"index": i, "value": v} for i, v in enumerate(values)],
+                "run_lengths": [{"index": i, "value": n} for i, n in enumerate(runs)],
+            },
+        }
+
+    def _session(self, payload=None):
+        session = FcapzMcpSession(rpc=FakeRpc())
+        session._store_capture(payload if payload is not None else self._payload())
+        return session
+
+    def test_capture_forwards_rle_and_post_clocks(self):
+        rpc = FakeRpc()
+        FcapzMcpSession(rpc=rpc).capture(config={"rle": True, "post_clocks": 500})
+        self.assertTrue(rpc.requests[-1]["rle"])
+        self.assertEqual(rpc.requests[-1]["post_clocks"], 500)
+
+    def test_each_sample_carries_its_run_and_start_clock(self):
+        page = self._session().capture_samples(count=10)
+
+        self.assertTrue(page["run_length_capture"])
+        self.assertEqual(page["total"], 4, "total counts stored entries")
+        self.assertEqual(
+            [(s["run_length"], s["clock"]) for s in page["samples"]],
+            [(3, 0), (2, 3), (1, 5), (4, 6)],
+        )
+
+    def test_a_plain_capture_is_unchanged(self):
+        page = self._session(_sample_capture()).capture_samples(count=2)
+
+        self.assertFalse(page["run_length_capture"])
+        self.assertNotIn("run_length", page["samples"][0])
+        self.assertNotIn("clock", page["samples"][0])
+
+    def test_run_lengths_that_do_not_line_up_are_not_used(self):
+        page = self._session(self._payload(runs=[3, 2])).capture_samples(count=10)
+
+        self.assertFalse(page["run_length_capture"])
+        self.assertNotIn("run_length", page["samples"][0])
+
+    def test_burst_length_and_min_length_count_clocks(self):
+        # lo reads A, A, B, A: the first burst is two entries but five clocks.
+        found = self._session().find_in_capture(op="bursts", field="lo", min_length=4)
+
+        self.assertTrue(found["run_length_capture"])
+        self.assertEqual(
+            [(m["position"], m["clock"], m["length"]) for m in found["matches"]],
+            [(0, 0, 5), (3, 6, 4)],
+        )
+
+    def test_matches_carry_the_clock(self):
+        found = self._session().find_in_capture(op="edges", field="lo")
+
+        self.assertEqual(
+            [(m["position"], m["clock"]) for m in found["matches"]], [(2, 5), (3, 6)]
+        )
+
+    def test_clocks_restart_in_each_segment(self):
+        def seg(tag):
+            return {
+                "segment": tag,
+                "samples": [{"index": i, "value": v} for i, v in enumerate([1, 2])],
+                "run_lengths": [{"index": 0, "value": 7}, {"index": 1, "value": 2}],
+            }
+
+        session = self._session(
+            {"ok": True, "format": "json", "result": {"segments": [seg(0), seg(1)]}}
+        )
+        page = session.capture_samples(count=10)
+
+        self.assertEqual(
+            [(s["segment"], s["clock"]) for s in page["samples"]],
+            [(0, 0), (0, 7), (1, 0), (1, 7)],
+        )
 
 
 if __name__ == "__main__":

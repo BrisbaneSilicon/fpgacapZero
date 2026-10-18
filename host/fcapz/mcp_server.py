@@ -86,6 +86,7 @@ TransactionKind = Literal["read", "write"]
 FindOp = Literal["edges", "rising", "falling", "match", "bursts"]
 TriggerMode = Literal["value_match", "edge_detect", "both"]
 ExtTriggerMode = Literal[0, 1, 2]  # 0=disabled, 1=OR, 2=AND
+StorQualMode = Literal[0, 1, 2]  # 0=off, 1=store on match, 2=store on no match
 
 
 class ProbeEntry(TypedDict):
@@ -134,6 +135,10 @@ class SamplePage(TypedDict):
     samples: list[dict[str, Any]]
     segments: int | None
     fields: list[str] | None
+    # A run-length capture stores each value once, with the sample clocks it
+    # held: its records carry `run_length` and `clock`, and `total` counts
+    # stored entries, not clocks.
+    run_length_capture: bool
 
 
 class AxiTransactionPage(TypedDict):
@@ -179,6 +184,8 @@ class CaptureMatches(TypedDict):
     # Entry keys depend on `op` (an edge has from/to, a burst a length), so
     # the records stay open like sample records do.
     matches: list[dict[str, Any]]
+    # Matches carry `clock` and a burst's `length` counts clocks.
+    run_length_capture: bool
 
 
 class CaptureChunk(TypedDict):
@@ -246,12 +253,14 @@ class CaptureConfigDict(TypedDict, total=False):
     channel: int
     decimation: int
     ext_trigger_mode: ExtTriggerMode
-    stor_qual_mode: int
+    stor_qual_mode: StorQualMode
     stor_qual_value: int | str
     stor_qual_mask: int | str
     startup_arm: bool
     trigger_holdoff: int
     trigger_delay: int
+    rle: bool
+    post_clocks: int
 
 
 _DEFAULT_CAPTURE_CHUNK_BYTES = 64 * 1024
@@ -1743,16 +1752,27 @@ class FcapzMcpSession:
         count_i = min(count_i, self._SAMPLES_MAX_PAGE)
 
         probes = self._selected_probes(cache.payload, fields)
-        entries: list[tuple[int | None, Any]] = []
+        # (segment, entry, run length, start clock); the last two only on a
+        # run-length capture, with clocks counted from the segment's start.
+        entries: list[tuple[int | None, Any, int | None, int | None]] = []
         for position, result in enumerate(results):
             segment = result.get("segment", position) if multi else None
-            entries.extend((segment, entry) for entry in result["samples"])
+            runs = self._run_lengths(result)
+            clocks = self._start_clocks(runs)
+            for i, entry in enumerate(result["samples"]):
+                if runs is None or clocks is None:
+                    entries.append((segment, entry, None, None))
+                else:
+                    entries.append((segment, entry, runs[i], clocks[i]))
 
         page = entries[start_i : start_i + count_i]
         next_start = start_i + len(page)
         rendered = []
-        for segment, entry in page:
+        for segment, entry, run, clock in page:
             sample = self._render_sample(entry, probes, radix)
+            if run is not None:
+                sample["run_length"] = run
+                sample["clock"] = clock
             if segment is not None:
                 sample["segment"] = segment
             rendered.append(sample)
@@ -1775,6 +1795,7 @@ class FcapzMcpSession:
             "reason": None,
             "segments": len(results) if multi else None,
             "fields": [name for name, _, _ in probes] if probes is not None else None,
+            "run_length_capture": self._is_run_length(results),
         }
         return out
 
@@ -1870,6 +1891,8 @@ class FcapzMcpSession:
         for seg_pos, result in enumerate(results):
             entries = result["samples"]
             seg = result.get("segment", seg_pos) if multi else None
+            runs = self._run_lengths(result)
+            clocks = self._start_clocks(runs)
             values = []
             for entry in entries:
                 raw = self._as_int(entry.get("value")) if isinstance(entry, dict) else None
@@ -1885,6 +1908,8 @@ class FcapzMcpSession:
                     rec["segment"] = seg
                 if trigger is not None:
                     rec["trigger_offset"] = base + i - trigger
+                if clocks is not None:
+                    rec["clock"] = clocks[i]
                 rec.update(extra)
                 found.append(rec)
 
@@ -1913,7 +1938,8 @@ class FcapzMcpSession:
                     if i < len(values) and masked(values[i]) == masked(values[run_start]):
                         continue
                     run_value = masked(values[run_start])
-                    length = i - run_start
+                    # In sample clocks: one per entry, or the entries' runs.
+                    length = i - run_start if runs is None else sum(runs[run_start:i])
                     if length >= min_len and (want_run is None or run_value == want_run):
                         hit(run_start, {"length": length, "value": self._fmt(run_value, radix)})
                     run_start = i
@@ -1935,6 +1961,7 @@ class FcapzMcpSession:
             "next_start": next_start if next_start < len(found) else None,
             "trigger_index": trigger,
             "matches": page,
+            "run_length_capture": self._is_run_length(results),
         }
 
     def _signal_slice(
@@ -1988,6 +2015,7 @@ class FcapzMcpSession:
             "next_start": None,
             "trigger_index": None,
             "matches": [],
+            "run_length_capture": False,
         }
 
     @staticmethod
@@ -2006,7 +2034,38 @@ class FcapzMcpSession:
             "samples": [],
             "segments": None,
             "fields": None,
+            "run_length_capture": False,
         }
+
+    @classmethod
+    def _run_lengths(cls, result: JsonDict) -> list[int] | None:
+        """Sample clocks each entry held, or None when not run-length.
+
+        `run_lengths` parallels `samples` entry for entry; a list that does
+        not cannot say which entry held for how long, so it is not used.
+        """
+        raw = result.get("run_lengths")
+        if not isinstance(raw, list) or len(raw) != len(result["samples"]):
+            return None
+        runs = [cls._as_int(e.get("value")) if isinstance(e, dict) else None for e in raw]
+        if any(run is None or run < 1 for run in runs):
+            return None
+        return runs  # type: ignore[return-value]
+
+    @staticmethod
+    def _start_clocks(runs: list[int] | None) -> list[int] | None:
+        """Clock, from the first entry, at which each entry starts."""
+        if runs is None:
+            return None
+        out, clock = [], 0
+        for run in runs:
+            out.append(clock)
+            clock += run
+        return out
+
+    @classmethod
+    def _is_run_length(cls, results: list[JsonDict]) -> bool:
+        return any(cls._run_lengths(result) is not None for result in results)
 
     @staticmethod
     def _trigger_index(result: JsonDict, sample_count: int) -> int | None:
@@ -3266,6 +3325,11 @@ def build_mcp_server(
         add decoded event metadata to the capture result.
         segments=true reads back every segment of a segmented core instead of
         segment 0 alone (fcapz_probe reports num_segments).
+        config.rle=true stores each sample once with the clocks it held (needs
+        rle_width > 0 in fcapz_probe; not with decimation or stor_qual_mode);
+        post_clocks also ends such a capture that many clocks after the
+        trigger. stor_qual_mode stores only matching (1) or only non-matching
+        (2) samples.
         The tool returns summary metadata only; page the samples with
         fcapz_get_capture_samples, or read fcapz://last-capture /
         fcapz_get_last_capture for the payload.
@@ -3331,8 +3395,10 @@ def build_mcp_server(
         Page with the returned `next_start` until it is null; `count` is
         capped at 512. `around_trigger=N` (N <= 255) returns the N samples
         either side of the trigger instead of start/count (an empty page with
-        a `reason` when the trigger cannot be located). To find something rather than
-        read everything, use fcapz_find_in_capture. For an AXI monitor
+        a `reason` when the trigger cannot be located). On a run-length
+        capture (`run_length_capture`) each record is one stored value that
+        held for `run_length` sample clocks from `clock`. To find something
+        rather than read everything, use fcapz_find_in_capture. For an AXI monitor
         capture, prefer fcapz_axi_transactions — transactions beat cycles for
         bus debugging.
         """
@@ -3366,17 +3432,19 @@ def build_mcp_server(
         - "rising" / "falling": 0->1 / 1->0 of bit `bit` (default 0).
         - "match": every sample where (signal & mask) == (value & mask);
           entries carry `value`.
-        - "bursts": maximal runs of one value, at least `min_length` long
-          (optionally only runs of `value`); entries carry `length`/`value`.
+        - "bursts": maximal runs of one value, at least `min_length` sample
+          clocks long (optionally only runs of `value`); entries carry
+          `length` (in clocks) and `value`.
         `mask` (default: the whole signal) applies to edges, match and bursts.
         value/mask accept a hex string for signals wider than 53 bits.
 
         Every entry has `position` — pass it to fcapz_get_capture_samples
         (start=position) to read the hit in context — plus the sample's own
-        `index`, `segment` on a segmented capture, and `trigger_offset` when
-        the trigger is located. `total`, `first_position` and `last_position`
-        cover every match, so "first/last sample where X == v" needs no
-        paging. Page with `next_start`; `count` is capped at 512.
+        `index`, `segment` on a segmented capture, `trigger_offset` when
+        the trigger is located, and `clock` on a run-length capture. `total`,
+        `first_position` and `last_position` cover every match, so
+        "first/last sample where X == v" needs no paging. Page with
+        `next_start`; `count` is capped at 512.
         """
 
         return session.find_in_capture(

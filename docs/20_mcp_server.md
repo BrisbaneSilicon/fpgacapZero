@@ -375,12 +375,14 @@ Valid `config` keys for `fcapz_capture` and `fcapz_configure` are:
 | `channel` | Capture channel or runtime probe mux channel. |
 | `decimation` | Sample decimation factor. |
 | `ext_trigger_mode` | External trigger mode. |
-| `stor_qual_mode` | Storage qualification mode. |
+| `stor_qual_mode` | Storage qualification: `0` off, `1` store only matching samples, `2` store only non-matching ones. `1` needs a core reporting `COMPARE_CAPS` bit 22; older cores have only `2`. |
 | `stor_qual_value` | Storage qualification compare value. |
 | `stor_qual_mask` | Storage qualification compare mask. |
 | `startup_arm` | Arm from hardware startup behavior when supported. |
 | `trigger_holdoff` | Trigger holdoff count. |
 | `trigger_delay` | Delay between trigger match and capture stop window. |
+| `rle` | Run-length capture: each stored entry is a value and the sample clocks it held. Needs `rle_width > 0` in `fcapz_probe`; not with `decimation` or `stor_qual_mode`. |
+| `post_clocks` | With `rle`, also end the capture this many sample clocks after the trigger (0 = no limit). |
 
 ### Embedded I/O
 
@@ -458,7 +460,10 @@ around the hits:
    (`N` up to 255, so the window fits one page — rejected above that); when
    the trigger cannot be located (a segmented capture, or one shorter than
    `pretrigger + posttrigger + 1`) the page comes back empty with a `reason`
-   rather than a guess.
+   rather than a guess. On a run-length capture the page has
+   `run_length_capture: true` and each record also carries `run_length` (the
+   sample clocks that value held) and `clock` (where it starts, counted from
+   the segment's first entry); `total` and positions count stored entries.
 3. **`fcapz_get_last_capture_chunk`** — raw bytes of the whole payload. Use
    it to export a capture verbatim, or for `csv`/`vcd` captures. It is a
    transfer mechanism, not a reading one: chunks are not independently
@@ -508,7 +513,7 @@ sample when `field` is omitted — and returns the matches, paged:
 | `edges` | Every change of the (masked) signal; with `value`, only changes *to* it. | `from`, `to` |
 | `rising` / `falling` | A 0→1 / 1→0 of bit `bit` (default 0) of the signal. | — |
 | `match` | Every sample where `signal & mask == value & mask`. | `value` |
-| `bursts` | Maximal runs of one value, at least `min_length` long; with `value`, only runs of it. | `length`, `value` |
+| `bursts` | Maximal runs of one value, at least `min_length` sample clocks long; with `value`, only runs of it. | `length` (clocks), `value` |
 
 `mask` defaults to the whole signal. `value` and `mask` accept a base-prefixed
 string for signals wider than 53 bits, and one with bits the signal does not
@@ -518,7 +523,9 @@ Every entry carries `position`, the flattened index that
 `fcapz_get_capture_samples(start=position)` takes, so a hit can be read in
 context with one more call; the sample's own `index`; `segment` on a
 segmented capture; and `trigger_offset` (samples after the trigger, negative
-before it) when the trigger can be located. A segmented capture is searched
+before it) when the trigger can be located. On a run-length capture each
+entry also carries `clock`, and a burst's `length` adds up the clocks its
+entries held, so it is time, not stored entries. A segmented capture is searched
 segment by segment, so the jump between two segments is never reported as an
 edge.
 
@@ -614,13 +621,17 @@ capture is refused rather than misread —
 ```json
 {"decoded": false,
  "unavailable_reason": "the capture stored only selected cycles (decimation=3), ...",
- "sampling": {"decimation": 3, "storage_qualified": false, "contiguous": false},
+ "sampling": {"decimation": 3, "storage_qualified": false, "run_length": false,
+              "contiguous": false},
  "transactions": []}
 ```
 
 The result keeps its full shape, so one code path reads both. `sampling` is
 reported either way, and travels with every transaction page. Re-capture with
-`decimation` 0 and `stor_qual_mode` 0 to decode.
+`decimation` 0 and `stor_qual_mode` 0 to decode. A run-length capture drops no
+cycle, so it decodes: the decoder expands each entry back to the clocks it
+held (`sampling.run_length` is `true`), and cycle numbers and latencies count
+sample clocks.
 
 The capture summary carries only the headline counts (`transaction_count`,
 `error_count`, `anomaly_count`, `flagged_count`, `max_latency`) plus
