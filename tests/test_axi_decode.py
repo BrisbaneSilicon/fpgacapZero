@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import unittest
+import unittest.mock
 
 from fcapz import axi_layout
 from fcapz.axi_decode import (
@@ -485,6 +486,101 @@ class CaptureProvenanceReachesTheDecoderTests(unittest.TestCase):
 
         self.assertFalse(payload["axi"]["decoded"])
         self.assertEqual(payload["axi"]["sampling"]["decimation"], 2)
+
+
+def _run_length(samples: list[int]) -> tuple[list[int], list[int]]:
+    """A dense trace as a run-length capture stores it: (values, clocks each)."""
+    values: list[int] = []
+    runs: list[int] = []
+    for sample in samples:
+        if values and values[-1] == sample:
+            runs[-1] += 1
+        else:
+            values.append(sample)
+            runs.append(1)
+    return values, runs
+
+
+class RunLengthTests(unittest.TestCase):
+    """A run-length capture drops no cycle, so it decodes once expanded."""
+
+    def _trace(self):
+        # Idle gaps and stalls repeat a sample, so they become runs > 1.
+        return _Trace().idle(4).write(0x1000, 0xCAFEBABE, gap=5).idle(3).read(
+            0x2000, 0xDEADBEEF, gap=7
+        )
+
+    def test_decodes_the_same_as_the_dense_trace(self):
+        t = self._trace()
+        values, runs = _run_length(t.samples)
+        self.assertLess(len(values), len(t.samples))
+
+        dense = decode_axi(t.samples, t.probes)
+        rle = decode_axi(values, t.probes, run_lengths=runs)
+
+        self.assertTrue(rle["decoded"])
+        self.assertEqual(rle["transactions"], dense["transactions"])
+        self.assertEqual(rle["max_latency"], dense["max_latency"])
+        self.assertTrue(rle["sampling"]["run_length"])
+        self.assertTrue(rle["sampling"]["contiguous"])
+
+    def test_without_the_run_lengths_the_latencies_would_be_wrong(self):
+        # What decoding the stored entries directly gave: cycles counted in
+        # entries, so every gap collapses to one.
+        t = self._trace()
+        values, _ = _run_length(t.samples)
+        dense = decode_axi(t.samples, t.probes)
+        entries = decode_axi(values, t.probes)
+        self.assertNotEqual(entries["max_latency"], dense["max_latency"])
+
+    def test_mismatched_run_lengths_refuse(self):
+        t = self._trace()
+        values, runs = _run_length(t.samples)
+        out = decode_axi(values, t.probes, run_lengths=runs[:-1])
+
+        self.assertFalse(out["decoded"])
+        self.assertIn("run lengths", out["unavailable_reason"])
+
+    def test_an_expansion_over_the_bound_refuses(self):
+        from fcapz import axi_decode
+
+        t = self._trace()
+        values, runs = _run_length(t.samples)
+        with unittest.mock.patch.object(axi_decode, "MAX_EXPANDED_CYCLES", len(t.samples) - 1):
+            out = decode_axi(values, t.probes, run_lengths=runs)
+
+        self.assertFalse(out["decoded"])
+        self.assertIn(f"spans {len(t.samples)} cycles", out["unavailable_reason"])
+        self.assertEqual(out["transactions"], [])
+
+    def test_the_serializer_passes_the_run_lengths(self):
+        from fcapz.analyzer import CaptureConfig, CaptureResult, TriggerConfig
+        from fcapz.rpc import RpcServer
+
+        t = self._trace()
+        values, runs = _run_length(t.samples)
+        config = CaptureConfig(
+            pretrigger=0,
+            posttrigger=len(values) - 1,
+            trigger=TriggerConfig(mode=0, value=0, mask=0),
+            sample_width=160,
+            depth=len(values),
+            probes=list(t.probes),
+            rle=True,
+        )
+        payload = RpcServer()._serialize_capture(
+            analyzer=_StubAnalyzer(),
+            config=config,
+            result=CaptureResult(config=config, samples=values, run_lengths=runs),
+            fmt="csv",
+            include_summary=False,
+            decode_axi_txns=True,
+        )
+
+        self.assertEqual(
+            payload["axi"]["transactions"],
+            decode_axi(t.samples, t.probes)["transactions"],
+        )
 
 
 if __name__ == "__main__":

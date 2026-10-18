@@ -1545,6 +1545,7 @@ decode_axi(
     *,
     decimation: int = 0,
     storage_qualified: bool = False,
+    run_lengths: Sequence[int] | None = None,
 ) -> dict[str, Any]
 ```
 
@@ -1562,6 +1563,10 @@ one that never happened, so a dropped response silently shifts every
 later pairing onto the wrong address, and "latency" becomes a count of
 stored samples. There is no way to recover the missing beats after the
 fact, so such a capture is refused rather than misread.
+
+`run_lengths` are a run-length capture's sample clocks per entry. The
+samples are expanded back to one per cycle before decoding, so cycle
+numbers and latencies count sample clocks, not stored entries.
 
 ### `looks_like_axi`
 

@@ -799,6 +799,7 @@ class RpcServer:
                     probe_defs,
                     decimation=config.decimation,
                     storage_qualified=bool(config.stor_qual_mode),
+                    run_lengths=result.run_lengths,
                 )
         return payload
 

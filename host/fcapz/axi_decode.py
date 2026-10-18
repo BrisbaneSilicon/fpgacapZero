@@ -447,10 +447,20 @@ def _pairing_block(pre_window: Sequence[str] = ()) -> dict[str, Any]:
     }
 
 
-def _sampling_block(decimation: int, storage_qualified: bool) -> dict[str, Any]:
+# A run-length capture is decoded after expanding it back to one sample per
+# cycle; this bounds that expansion, and with it the decode time (about a
+# second per million cycles), well inside a capture call's timeout.
+MAX_EXPANDED_CYCLES = 1 << 20
+
+
+def _sampling_block(
+    decimation: int, storage_qualified: bool, run_length: bool = False
+) -> dict[str, Any]:
     return {
         "decimation": int(decimation),
         "storage_qualified": bool(storage_qualified),
+        # Run-length storage drops no cycle: each entry says how long it held.
+        "run_length": bool(run_length),
         "contiguous": not decimation and not storage_qualified,
     }
 
@@ -484,6 +494,7 @@ def decode_axi(
     *,
     decimation: int = 0,
     storage_qualified: bool = False,
+    run_lengths: Sequence[int] | None = None,
 ) -> dict[str, Any]:
     """Reconstruct AXI4-Lite transactions from a capture's samples.
 
@@ -499,6 +510,10 @@ def decode_axi(
     later pairing onto the wrong address, and "latency" becomes a count of
     stored samples. There is no way to recover the missing beats after the
     fact, so such a capture is refused rather than misread.
+
+    ``run_lengths`` are a run-length capture's sample clocks per entry. The
+    samples are expanded back to one per cycle before decoding, so cycle
+    numbers and latencies count sample clocks, not stored entries.
     """
     names = [p.name for p in probes]
     if not looks_like_axi(names):
@@ -508,7 +523,7 @@ def decode_axi(
             + ", ".join(missing)
         )
     decoder = _Decoder(probes)
-    sampling = _sampling_block(decimation, storage_qualified)
+    sampling = _sampling_block(decimation, storage_qualified, bool(run_lengths))
     if not sampling["contiguous"]:
         how = " and ".join(
             part
@@ -526,6 +541,26 @@ def decode_axi(
             "Re-capture with decimation 0 and storage qualification off.",
             sampling,
         )
+    if run_lengths:
+        if len(run_lengths) != len(samples):
+            return _undecodable(
+                decoder.addr_w,
+                decoder.data_w,
+                f"the capture has {len(run_lengths)} run lengths for "
+                f"{len(samples)} samples, so cycles cannot be recovered.",
+                sampling,
+            )
+        cycles = sum(int(n) for n in run_lengths)
+        if cycles > MAX_EXPANDED_CYCLES:
+            return _undecodable(
+                decoder.addr_w,
+                decoder.data_w,
+                f"the run-length capture spans {cycles} cycles, over the "
+                f"{MAX_EXPANDED_CYCLES} the decoder expands. Re-capture with "
+                "rle off or with post_clocks bounding the window.",
+                sampling,
+            )
+        samples = [v for v, n in zip(samples, run_lengths) for _ in range(int(n))]
     transactions = decoder.decode(samples)
     addr_digits = max(1, (decoder.addr_w + 3) // 4)
     data_digits = max(1, (decoder.data_w + 3) // 4)
