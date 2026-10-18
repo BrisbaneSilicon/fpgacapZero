@@ -170,6 +170,12 @@ class EjtagAxiController:
 
     def _check_error(self, status: int, resp: int, context: str) -> None:
         if status & self._ERROR:
+            # The bridge's error flag is sticky until CMD_RESET: left set, every
+            # later command would fail with this same error.
+            try:
+                self._prime_cdc()
+            except Exception:
+                pass  # the error being reported matters more
             raise AXIError(f"{context}: resp={resp}")
 
     def _wait_valid(self, context: str) -> tuple[int, int, int, int]:

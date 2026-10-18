@@ -24,6 +24,19 @@ from .transport import (
 
 _log = logging.getLogger(__name__)
 
+
+class CaptureNotReady(TimeoutError):
+    """The armed capture has not completed yet.
+
+    A ``TimeoutError`` subclass so every existing ``except TimeoutError``
+    still catches it, but a distinct type because it is the one timeout that
+    is *expected*: the trigger simply has not fired, the core is still armed,
+    and the right response is to wait longer. A timeout from the transport
+    while reading status or sample data means something else entirely -- the
+    link may be wedged -- and must not be mistaken for it.
+    """
+
+
 _ADDR_VERSION = 0x0000
 # ASCII "LA" (Logic Analyzer) packed into VERSION[15:0] as the ELA core
 # identity magic.  Hosts must reject any bitstream that does not present
@@ -72,6 +85,7 @@ _ADDR_SEG_SEL = 0x00C0
 _ADDR_SEG_START = 0x00C8
 _ADDR_TIMESTAMP_W = 0x00C4
 _ADDR_FEATURES = 0x003C
+_FEATURE_STOR_QUAL = 1 << 4  # FEATURES[4]: built with STOR_QUAL
 _ADDR_SEQ_BASE = 0x0040
 _SEQ_STRIDE = 20
 _ADDR_PROBE_SEL = 0x00AC
@@ -182,6 +196,18 @@ class SequencerStage:
         cfg |= (int(self.is_final) & 0x1) << 12
         cfg |= (self.count_target & 0xFFFF) << 16
         return cfg
+
+
+def _validate_stage_fields(stage: SequencerStage, label: str) -> None:
+    """Refuse a field SEQ_CFG would truncate rather than program it changed.
+
+    `pack_cfg` masks each field to its width, so a count_target of 65536
+    would program 0, which the sequencer reads as already reached.
+    """
+    for name, top in (("combine", 3), ("next_state", 3), ("count_target", 0xFFFF)):
+        value = getattr(stage, name)
+        if not 0 <= value <= top:
+            raise ValueError(f"{label} {name} must be 0..{top}, got {value}")
 
 
 def _compare_mode_available(caps: int, mode: int) -> bool:
@@ -661,6 +687,12 @@ class Analyzer:
         raw_compare_caps = int(_read(_ADDR_COMPARE_CAPS))
         self._hw_compare_caps = raw_compare_caps
         hw_compare_caps = raw_compare_caps or _COMPARE_CAPS_LEGACY_FULL
+        # Without the qualifier SQ_MODE is not decoded, and the capture would
+        # store every sample while the caller believes it was filtered.
+        if config.stor_qual_mode and not hw_features & _FEATURE_STOR_QUAL:
+            raise ValueError(
+                "storage qualification not present in this bitstream (STOR_QUAL=0)"
+            )
         sq_mode = _sq_mode_register(raw_compare_caps, config.stor_qual_mode)
         self._hw_timestamp_w = int(_read(_ADDR_TIMESTAMP_W))
         self._hw_num_segments = max(1, int(_read(_ADDR_NUM_SEGMENTS)))
@@ -687,6 +719,24 @@ class Analyzer:
                     f"pre+post+1 exceeds segment depth {seg_depth}"
                 )
 
+        if config.sequence is not None:
+            # All of it before any write: a sequence refused halfway would
+            # leave the core holding settings this Analyzer does not know.
+            if hw_trig_stages == 0:
+                raise ValueError(
+                    "trigger sequencer not present in this bitstream (TRIG_STAGES=0)"
+                )
+            if len(config.sequence) > hw_trig_stages:
+                raise ValueError(
+                    f"sequence has {len(config.sequence)} stages but hw supports "
+                    f"only {hw_trig_stages}"
+                )
+            for idx, stage in enumerate(config.sequence):
+                _validate_stage_fields(stage, f"stage {idx}")
+                _validate_compare_mode(hw_compare_caps, stage.cmp_mode_a, f"stage {idx} A")
+                _validate_compare_mode(hw_compare_caps, stage.cmp_mode_b, f"stage {idx} B")
+                _validate_dual_compare(hw_compare_caps, stage, f"stage {idx}")
+
         mode_bits = 0
         if config.trigger.mode in ("value_match", "both"):
             mode_bits |= _TRIG_VALUE_MATCH
@@ -694,6 +744,13 @@ class Analyzer:
             mode_bits |= _TRIG_EDGE_DETECT
         if mode_bits == 0:
             raise ValueError("invalid trigger mode")
+        wide = bool(hw_compare_caps & _COMPARE_CAPS_WIDE_TRIG)
+        if not wide and ((config.trigger.value >> 32) or (config.trigger.mask >> 32)):
+            raise ValueError(
+                "trigger value/mask exceed 32 bits but this core lacks "
+                "WIDE_TRIG (COMPARE_CAPS bit 18); only the low 32 bits of "
+                "comparator A are programmable"
+            )
 
         self.transport.write_reg(_ADDR_PRETRIG, config.pretrigger)
         self.transport.write_reg(_ADDR_POSTTRIG, config.posttrigger)
@@ -708,13 +765,6 @@ class Analyzer:
         # instead of a stale/reset value.  Otherwise an all-zero mask (immediate /
         # always-true) trigger leaves the upper mask bits set, so the trigger is
         # not actually always-true and never fires (the capture never completes).
-        wide = bool(hw_compare_caps & _COMPARE_CAPS_WIDE_TRIG)
-        if not wide and ((config.trigger.value >> 32) or (config.trigger.mask >> 32)):
-            raise ValueError(
-                "trigger value/mask exceed 32 bits but this core lacks "
-                "WIDE_TRIG (COMPARE_CAPS bit 18); only the low 32 bits of "
-                "comparator A are programmable"
-            )
         if wide:
             words = (config.sample_width + 31) // 32
             for k in range(1, words):
@@ -753,19 +803,7 @@ class Analyzer:
             )
 
         if config.sequence is not None:
-            if hw_trig_stages == 0:
-                raise ValueError(
-                    "trigger sequencer not present in this bitstream (TRIG_STAGES=0)"
-                )
-            if len(config.sequence) > hw_trig_stages:
-                raise ValueError(
-                    f"sequence has {len(config.sequence)} stages but hw supports "
-                    f"only {hw_trig_stages}"
-                )
             for idx, stage in enumerate(config.sequence):
-                _validate_compare_mode(hw_compare_caps, stage.cmp_mode_a, f"stage {idx} A")
-                _validate_compare_mode(hw_compare_caps, stage.cmp_mode_b, f"stage {idx} B")
-                _validate_dual_compare(hw_compare_caps, stage, f"stage {idx}")
                 base = _ADDR_SEQ_BASE + idx * _SEQ_STRIDE
                 self.transport.write_reg(base + 0, stage.pack_cfg())
                 self.transport.write_reg(base + 4, stage.value_a)
@@ -1147,7 +1185,7 @@ class Analyzer:
         if self._config is None:
             raise RuntimeError("call configure() before capture()")
         if not self.wait_done(timeout):
-            raise TimeoutError("capture did not complete within timeout")
+            raise CaptureNotReady("capture did not complete within timeout")
 
         with self.transport.transaction_lock():
             self._select_instance()
@@ -1249,6 +1287,10 @@ class Analyzer:
             "posttrigger": cfg.posttrigger,
             "channel": cfg.channel,
             "decimation": cfg.decimation,
+            # Recorded so an offline reader knows whether the samples are
+            # consecutive cycles. AXI reassembly, for one, is only sound when
+            # they are (see axi_decode.decode_axi).
+            "stor_qual_mode": cfg.stor_qual_mode,
             "ext_trigger_mode": cfg.ext_trigger_mode,
             "trigger": {
                 "mode": cfg.trigger.mode,
@@ -1259,6 +1301,13 @@ class Analyzer:
             "segment": result.segment,
             "samples": [{"index": i, "value": v} for i, v in enumerate(result.samples)],
         }
+        if cfg.probes:
+            # The field map, so a reader does not have to guess it back from
+            # the flattened width -- several geometries share one width.
+            d["probes"] = [
+                {"name": pr.name, "width": pr.width, "lsb": pr.lsb}
+                for pr in cfg.probes
+            ]
         if result.timestamps:
             d["timestamps"] = [
                 {"index": i, "value": v} for i, v in enumerate(result.timestamps)
@@ -1546,7 +1595,7 @@ class Analyzer:
             "depth": depth,
             "num_channels": num_chan if num_chan >= 1 else 1,
             "trig_stages": int(features & 0xF),
-            "has_storage_qualification": bool(features & (1 << 4)),
+            "has_storage_qualification": bool(features & _FEATURE_STOR_QUAL),
             "has_decimation": bool(features & (1 << 5)),
             "has_ext_trigger": bool(features & (1 << 6)),
             "has_timestamp": bool(features & (1 << 7)),

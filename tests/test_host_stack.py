@@ -1113,8 +1113,15 @@ class AnalyzerTests(unittest.TestCase):
 class StorageQualModeTests(unittest.TestCase):
     """stor_qual_mode 1 (match) and 2 (no match) map onto SQ_MODE by core."""
 
-    def _configure(self, caps: int, mode: int, old_sq_mode: int = 0) -> FakeTransport:
+    @staticmethod
+    def _sq_core() -> FakeTransport:
+        """A core built with STOR_QUAL (FEATURES[4])."""
         transport = FakeTransport()
+        transport.regs[0x003C] = int(transport.regs[0x003C]) | (1 << 4)
+        return transport
+
+    def _configure(self, caps: int, mode: int, old_sq_mode: int = 0) -> FakeTransport:
+        transport = self._sq_core()
         transport.regs[0x00E0] = caps
         transport.regs[0x0030] = old_sq_mode
         analyzer = Analyzer(transport)
@@ -1136,8 +1143,24 @@ class StorageQualModeTests(unittest.TestCase):
         for caps in (0x3_01FF, 0):  # 0 = core older than COMPARE_CAPS
             self.assertEqual(self._configure(caps, 2).regs[0x0030], 1)
 
+    def test_a_core_without_the_qualifier_refuses_before_writing(self):
+        # SQ_MODE is not decoded there: the capture would store every sample
+        # while the caller believes it was filtered.
+        for mode in (1, 2):
+            with self.subTest(mode=mode):
+                transport = FakeTransport()
+                transport.regs[0x00E0] = 0x3_01FF | (1 << 22)
+                analyzer = Analyzer(transport)
+                analyzer.connect()
+                before = dict(transport.regs)
+                with self.assertRaisesRegex(ValueError, "STOR_QUAL=0"):
+                    analyzer.configure(
+                        replace(AnalyzerTests()._make_cfg(), stor_qual_mode=mode)
+                    )
+                self.assertEqual(transport.regs, before)
+
     def test_older_core_rejects_match_before_writing(self):
-        transport = FakeTransport()
+        transport = self._sq_core()
         analyzer = Analyzer(transport)
         analyzer.connect()
         before = dict(transport.regs)
@@ -2152,6 +2175,66 @@ class SequencerBoundsTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             analyzer.configure(cfg)
+
+    def _refused_writes(self, transport: FakeTransport, cfg: CaptureConfig) -> list:
+        """Configure, expecting a refusal; returns the registers it wrote."""
+        analyzer = Analyzer(transport)
+        analyzer.connect()
+        writes = []
+        real = transport.write_reg
+        transport.write_reg = lambda addr, value: (writes.append(addr), real(addr, value))
+        with self.assertRaises(ValueError):
+            analyzer.configure(cfg)
+        return writes
+
+    def test_a_refused_sequence_writes_nothing(self):
+        # A refusal halfway would leave the core holding a configuration the
+        # Analyzer does not know, and the next arm would run it.
+        for name, sequence in (
+            ("too many stages", [SequencerStage()] * 3),
+            ("bad last stage", [SequencerStage(), SequencerStage(count_target=1 << 16)]),
+        ):
+            with self.subTest(name):
+                cfg = CaptureConfig(
+                    pretrigger=0,
+                    posttrigger=1,
+                    trigger=TriggerConfig(mode="value_match", value=0, mask=0xFF),
+                    sample_width=8,
+                    depth=1024,
+                    sequence=sequence,
+                )
+                writes = self._refused_writes(self._make_transport_with_stages(2), cfg)
+                self.assertEqual(writes, [])
+
+    def test_a_refused_wide_trigger_writes_nothing(self):
+        cfg = CaptureConfig(
+            pretrigger=0,
+            posttrigger=1,
+            trigger=TriggerConfig(mode="value_match", value=1 << 32, mask=(1 << 33) - 1),
+            sample_width=8,
+            depth=1024,
+        )
+        self.assertEqual(self._refused_writes(FakeTransport(), cfg), [])
+
+    def test_stage_fields_wider_than_seq_cfg_are_refused(self):
+        # pack_cfg would mask them: a count_target of 65536 programs 0,
+        # which the sequencer takes as already reached.
+        for field, value in (("count_target", 1 << 16), ("count_target", -1),
+                             ("next_state", 4), ("combine", 4)):
+            with self.subTest(field=field, value=value):
+                transport = self._make_transport_with_stages(2)
+                analyzer = Analyzer(transport)
+                analyzer.connect()
+                cfg = CaptureConfig(
+                    pretrigger=0,
+                    posttrigger=1,
+                    trigger=TriggerConfig(mode="value_match", value=0, mask=0xFF),
+                    sample_width=8,
+                    depth=1024,
+                    sequence=[SequencerStage(**{field: value})],
+                )
+                with self.assertRaisesRegex(ValueError, field):
+                    analyzer.configure(cfg)
 
     def test_sequence_absent_hw_stages_zero_raises(self):
         transport = self._make_transport_with_stages(0)
