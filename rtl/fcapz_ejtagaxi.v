@@ -226,6 +226,43 @@ module fcapz_ejtagaxi #(
     end
 
     // ========================================================================
+    //  AXI_CLK domain registers
+    // ========================================================================
+    // Declared ahead of the TCK logic, which reads several of them; Verilog
+    // requires a declaration before use, and newer Icarus releases enforce it.
+
+    // -- Launch registers (axi_clk domain) ------------------------------------
+    reg [3:0]           launch_cmd;
+    reg [ADDR_W-1:0]    launch_addr;
+    reg [DATA_W-1:0]    launch_wdata;
+    reg [DATA_W/8-1:0]  launch_wstrb;
+    reg [7:0]           launch_burst_len;
+    reg [2:0]           launch_burst_size;
+    reg [1:0]           launch_burst_type;
+
+    // -- Response shadow (axi_clk domain, read by tck via 2-FF sync) ----------
+    reg [DATA_W-1:0] resp_rdata;
+    reg [1:0]        resp_code;
+
+    // -- AXI FSM state --------------------------------------------------------
+    reg [3:0]  axi_state;
+    reg [11:0] timeout_cnt;
+    reg [7:0]  beat_count;
+    reg        reset_req_sync1_axi;
+    reg        reset_req_sync2_axi;
+    reg        reset_req_seen_axi;
+    reg        dut_reset_ack_toggle_axi;
+    reg [CMDQ_W-1:0]    dbg_axi_deq_cmdq;
+    reg [3:0]           dbg_axi_deq_cmd;
+    reg [ADDR_W-1:0]    dbg_axi_deq_addr;
+    reg [DATA_W-1:0]    dbg_axi_deq_wdata;
+    reg [DATA_W/8-1:0]  dbg_axi_deq_wstrb;
+    reg [3:0]           dbg_axi_deq_state;
+    reg                 dbg_axi_deq_fire;
+    reg [15:0]          dbg_axi_cycle_count;
+    reg [15:0]          dbg_axi_deq_count;
+
+    // ========================================================================
     //  TCK domain registers
     // ========================================================================
 
@@ -1035,37 +1072,6 @@ module fcapz_ejtagaxi #(
     wire [ADDR_W-1:0]   cmdq_addr       = cmdq_rd_data[12 + DATA_W/8 + DATA_W + ADDR_W:
                                                         13 + DATA_W/8 + DATA_W];
     wire [3:0]          cmdq_cmd        = cmdq_rd_data[CMDQ_W-1:CMDQ_W-4];
-
-    // -- Launch registers (axi_clk domain) ------------------------------------
-    reg [3:0]           launch_cmd;
-    reg [ADDR_W-1:0]    launch_addr;
-    reg [DATA_W-1:0]    launch_wdata;
-    reg [DATA_W/8-1:0]  launch_wstrb;
-    reg [7:0]           launch_burst_len;
-    reg [2:0]           launch_burst_size;
-    reg [1:0]           launch_burst_type;
-
-    // -- Response shadow (axi_clk domain, read by tck via 2-FF sync) ----------
-    reg [DATA_W-1:0] resp_rdata;
-    reg [1:0]        resp_code;
-
-    // -- AXI FSM state --------------------------------------------------------
-    reg [3:0]  axi_state;
-    reg [11:0] timeout_cnt;
-    reg [7:0]  beat_count;
-    reg        reset_req_sync1_axi;
-    reg        reset_req_sync2_axi;
-    reg        reset_req_seen_axi;
-    reg        dut_reset_ack_toggle_axi;
-    reg [CMDQ_W-1:0]    dbg_axi_deq_cmdq;
-    reg [3:0]           dbg_axi_deq_cmd;
-    reg [ADDR_W-1:0]    dbg_axi_deq_addr;
-    reg [DATA_W-1:0]    dbg_axi_deq_wdata;
-    reg [DATA_W/8-1:0]  dbg_axi_deq_wstrb;
-    reg [3:0]           dbg_axi_deq_state;
-    reg                 dbg_axi_deq_fire;
-    reg [15:0]          dbg_axi_cycle_count;
-    reg [15:0]          dbg_axi_deq_count;
 
     // -- AXI_CLK initial values -----------------------------------------------
     initial begin

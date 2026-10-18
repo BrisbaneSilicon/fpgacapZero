@@ -9,6 +9,8 @@ from .analyzer import (
     ProbeSpec,
     SequencerStage,
     TriggerConfig,
+    entry_start_clocks,
+    expand_run_lengths,
 )
 from .axi_decode import AxiTransaction, decode_axi, looks_like_axi
 from .axi_monitor import AxiGeometry, AxiMonitor, AxiMonitorError
@@ -49,6 +51,8 @@ __all__ = [
     "ProbeSpec",
     "SequencerStage",
     "TriggerConfig",
+    "entry_start_clocks",
+    "expand_run_lengths",
     "Transport",
     "OpenOcdTransport",
     "XilinxHwServerTransport",

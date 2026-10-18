@@ -131,6 +131,24 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   numbers as doubles. The MCP SDK is an optional dependency:
   `pip install fpgacapzero[mcp]`. See [MCP server](docs/20_mcp_server.md).
 
+- **Run-length capture (`RLE_W`).** A new ELA parameter (0 or 1..16, default 0)
+  adds a run-count RAM so one buffer entry holds a sample and how many sample
+  clocks it repeated, up to `2^RLE_W`. Idle or slow signals then cover far more
+  time in the same `DEPTH`. Turned on per capture with `CaptureConfig.rle`,
+  `fcapz capture --rle`, the RPC `rle` field, or a checkbox in the GUI and web
+  interface. Results gain `run_lengths`; VCD, the previews and the web viewer
+  place entries at their start clocks, and `expand_run_lengths()` restores one
+  sample per clock; a VCD ends where the last run does. Pre/post-trigger
+  windows count entries. Counts read back on the timestamp burst lane (`BURST_PTR[31:30]=2'b11`) or the USER1 timestamp
+  window. New registers `RLE_CTRL` (0x00A8) and `RLE_W` (0x00CC). An optional
+  post-trigger clock limit (`RLE_POST_CLKS`, 0x0090; `CaptureConfig.post_clocks`,
+  `--post-clocks`, RPC `post_clocks`, GUI and web fields) also ends the window
+  N sample clocks after the trigger, so a quiet signal cannot hold it open.
+  Both HDLs and all standalone ELA wrappers; `RLE_W=0` builds and behaves
+  exactly as before. Not combinable with decimation or storage qualification. The DE25-Nano
+  reference design builds with `RLE_W=16` and a second ELA channel that holds
+  each value for 8 clocks, and is hardware-validated with it.
+
 - **Vendor-neutral AXI4 interconnect.** A new generated `fcapz_axi_interconnect`
   (`rtl/`, a 2×1 full-AXI4 crossbar) merges a soft CPU and the EJTAG-AXI bridge
   onto one monitored bus as portable RTL, shared by both VexRiscv variants below
@@ -232,6 +250,17 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   server's bound from its own. **Migration:** read `fcapz://last-capture` for
   the whole payload — it serves an already-built string, costs 0 ms of stall,
   and has no ceiling — or page it with `fcapz_get_last_capture_chunk`.
+
+- **CI — RTL lint now includes yosys's pre-synthesis check.** A new
+  `sim/run_yosys_check.py` runs `proc` then `check` (LibreLane's
+  `pre_synth_chk` step) on every Verilator lint target, with that target's
+  `-G` parameter overrides, and on every Verilog parameter set in the parity
+  manifests, and fails on any warning. Its
+  `--self-test` proves it rejects a loop index shared by two clocked blocks.
+  The `lint-rtl` job now gets Verilator and yosys from a pinned OSS CAD Suite;
+  Ubuntu's Verilator was too old to report `MULTIDRIVENPROC`. The job also
+  elaborates the RTL with the suite's newer Icarus (`run_sim.py --lint-only`),
+  which rejects a signal used before its declaration.
 
 - **DE25-Nano — `trigger_out` is now observable from the host.** Both DE25
   tops count the clocks the ELA `trigger_out` is high and expose the count on
@@ -467,6 +496,53 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   request (16 tools under `--read-only`, 20 by default, 23 with all writes
   enabled). The session-level permission checks are unchanged and remain the
   enforcement.
+
+- **ELA — a setting written just before ARM could miss that capture.** The
+  settings crossed into the sample clock through two synchronizer flops, but
+  the arm pulse came off the first flop of its own, one clock ahead. With a
+  sample clock slower than the JTAG writes, a setting and the ARM (or
+  `STARTUP_ARM` and a soft reset) landing on the same sample clock edge gave
+  that capture the old setting. The `CTRL` write that arms or soft-resets now
+  snapshots the settings in the JTAG domain, and the sample domain copies that
+  snapshot one clock before the pulse that uses it, so a capture takes exactly
+  the settings written before its ARM and none written after. The snapshot
+  replaces the first synchronizer stage, so the cost is four flip-flops, with
+  no new timing constraints. ARM and soft reset reach the capture two sample
+  clocks later than before. Older bitstreams keep the race; `force_idle()`
+  still covers it for `STARTUP_ARM`.
+- **ELA — storage qualification stored the wrong samples.** The core took
+  `SQ_MODE` as the raw compare mode with 0 meaning off, so EQ could not be
+  selected, and the host wrote 1 for "store when match" (NEQ on the core) and 2
+  for "store when no match" (LT). The host also skipped the write for mode 0, so
+  a qualifier from an earlier capture stayed on. `SQ_MODE` now holds the compare
+  mode plus one (1 = EQ, 2 = NEQ, ... 9 = CHANGED; 0 and 10..15 = off), shown by
+  new `COMPARE_CAPS` bit 22, and the host always writes it. On older cores the
+  host maps mode 2 to NEQ and rejects mode 1. Code that writes `SQ_MODE`
+  directly must add 1 to the compare mode. `AxiMonitor.beat_storage_qual()` now
+  returns mode 2. Both HDLs. The DE25-Nano ELA now builds with `STOR_QUAL=1`,
+  and its hardware tests cover modes 0, 1 and 2.
+
+- **ELA — the sequencer loop index had two drivers before optimization.** One
+  module-level `integer si` was the loop index of two clocked blocks, so right
+  after `proc` yosys `check` reported 32 conflicting drivers, and recent
+  Verilator releases flag `MULTIDRIVENPROC`. Optimization removed the dead flops, so FPGA netlists
+  were correct, but flows that gate on the pre-synthesis check (LibreLane, Tiny
+  Tapeout) stopped at synthesis. Each block now declares its own index; the
+  synthesized netlist is unchanged.
+
+- **EJTAG-UART — yosys could not read the core.** The simulation-only baud
+  check calls `$error`/`$warning` with run-time arguments in an `initial`
+  block, which yosys rejects, so yosys-based flows stopped at read. Synthesis
+  now skips that block (`` `ifndef SYNTHESIS ``); simulators still run it.
+
+- **ELA (Gowin) — the unused user chain's TDO was undriven.** Only the
+  selected chain's TDO had a driver, leaving the other `GW_JTAG` input
+  floating. It is now tied low. Both HDLs.
+
+- **EJTAG-AXI and EJTAG-UART — newer Icarus could not elaborate them.** Each
+  used registers before declaring them, which Icarus 14 rejects. The
+  declarations (and the UART's error-flag synchronizer) now come first; the
+  logic is unchanged.
 
 - **ELA — `trigger_out` stayed high through the trigger delay.** With
   `trigger_delay > 0` a hit still present during the countdown kept
