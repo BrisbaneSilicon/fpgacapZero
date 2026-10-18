@@ -873,6 +873,8 @@ def _run_axi_decode(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     samples = [entry["value"] for entry in data.get("samples", [])]
+    # A run-length export pairs each sample with the clocks it held.
+    run_lengths = [entry["value"] for entry in data.get("run_lengths") or []] or None
     if not samples:
         print(f"error: {args.capture} carries no samples", file=sys.stderr)
         return 1
@@ -886,6 +888,7 @@ def _run_axi_decode(args: argparse.Namespace) -> int:
             # was, for every capture the previous default produced.
             decimation=int(data.get("decimation") or 0),
             storage_qualified=bool(data.get("stor_qual_mode") or 0),
+            run_lengths=run_lengths,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -1155,6 +1158,7 @@ def main() -> int:
                     cfg.probes,
                     decimation=cfg.decimation,
                     storage_qualified=bool(cfg.stor_qual_mode),
+                    run_lengths=result.run_lengths or None,
                 ),
                 only_anomalies=False,
                 kind=None,

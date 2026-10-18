@@ -343,6 +343,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   check now runs before the first write. A stage `count_target`,
   `next_state` or `combine` too wide for `SEQ_CFG` is refused: a
   `count_target` of 65536 used to program 0, which fires on the first match.
+- **CLI — `axi-decode` and `capture --decode-axi` read run-length captures.**
+  Each entry was taken as one cycle, which shortened latencies (an 8-cycle
+  wait could read as 2) and could merge back-to-back handshakes. Entries now
+  expand to the clocks they held, as the RPC decode already did.
 - **RPC — `configure`/`capture` no longer assume a 1024-deep core.** An
   omitted `depth` defaulted to 1024 and an omitted `sample_width` to 8, so
   any core built another size (the Arty AXI monitor is 256 deep) refused

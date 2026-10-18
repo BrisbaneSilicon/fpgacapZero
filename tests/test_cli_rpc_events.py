@@ -441,6 +441,34 @@ class CliAxiDecodeTests(unittest.TestCase):
         self.assertEqual(decoded["protocol"], "axi4lite")
         self.assertEqual(decoded["transactions"][0]["addr"], "0x00001000")
 
+    def test_a_run_length_capture_decodes_like_the_dense_one(self):
+        # Idle cycles before the response collapse into one run-length entry;
+        # read entry by entry, the latency would shrink from 7 cycles to 3.
+        self._cycle()
+        self._cycle(awvalid=1, awready=1, awaddr=0x1000)
+        self._cycle(wvalid=1, wready=1, wdata=0x5, wstrb=0xF)
+        for _ in range(5):
+            self._cycle()
+        self._cycle(bvalid=1, bready=1, bresp=0)
+        code, out, _ = self._run("axi-decode", self._capture_file(), "--json")
+        self.assertEqual(code, 0)
+        dense = json.loads(out)["transactions"]
+
+        values, runs = [], []
+        for sample in self.samples:
+            if values and values[-1] == sample:
+                runs[-1] += 1
+            else:
+                values.append(sample)
+                runs.append(1)
+        self.samples = values
+        code, out, _ = self._run("axi-decode", self._capture_file(run_lengths=[
+            {"index": i, "value": n} for i, n in enumerate(runs)
+        ]), "--json")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["transactions"], dense)
+        self.assertEqual(dense[0]["latency"], 7)
+
     def test_a_capture_with_no_samples_is_reported(self):
         code, _, err = self._run("axi-decode", self._capture_file())
         self.assertEqual(code, 1)
