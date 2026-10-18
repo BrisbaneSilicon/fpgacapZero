@@ -197,6 +197,18 @@ class SequencerStage:
         return cfg
 
 
+def _validate_stage_fields(stage: SequencerStage, label: str) -> None:
+    """Refuse a field SEQ_CFG would truncate rather than program it changed.
+
+    `pack_cfg` masks each field to its width, so a count_target of 65536
+    would program 0, which the sequencer reads as already reached.
+    """
+    for name, top in (("combine", 3), ("next_state", 3), ("count_target", 0xFFFF)):
+        value = getattr(stage, name)
+        if not 0 <= value <= top:
+            raise ValueError(f"{label} {name} must be 0..{top}, got {value}")
+
+
 def _compare_mode_available(caps: int, mode: int) -> bool:
     """Return True when a 4-bit compare mode is implemented by the bitstream."""
     return 0 <= mode <= 8 and bool(caps & (1 << mode))
@@ -700,6 +712,24 @@ class Analyzer:
                     f"pre+post+1 exceeds segment depth {seg_depth}"
                 )
 
+        if config.sequence is not None:
+            # All of it before any write: a sequence refused halfway would
+            # leave the core holding settings this Analyzer does not know.
+            if hw_trig_stages == 0:
+                raise ValueError(
+                    "trigger sequencer not present in this bitstream (TRIG_STAGES=0)"
+                )
+            if len(config.sequence) > hw_trig_stages:
+                raise ValueError(
+                    f"sequence has {len(config.sequence)} stages but hw supports "
+                    f"only {hw_trig_stages}"
+                )
+            for idx, stage in enumerate(config.sequence):
+                _validate_stage_fields(stage, f"stage {idx}")
+                _validate_compare_mode(hw_compare_caps, stage.cmp_mode_a, f"stage {idx} A")
+                _validate_compare_mode(hw_compare_caps, stage.cmp_mode_b, f"stage {idx} B")
+                _validate_dual_compare(hw_compare_caps, stage, f"stage {idx}")
+
         mode_bits = 0
         if config.trigger.mode in ("value_match", "both"):
             mode_bits |= _TRIG_VALUE_MATCH
@@ -707,6 +737,13 @@ class Analyzer:
             mode_bits |= _TRIG_EDGE_DETECT
         if mode_bits == 0:
             raise ValueError("invalid trigger mode")
+        wide = bool(hw_compare_caps & _COMPARE_CAPS_WIDE_TRIG)
+        if not wide and ((config.trigger.value >> 32) or (config.trigger.mask >> 32)):
+            raise ValueError(
+                "trigger value/mask exceed 32 bits but this core lacks "
+                "WIDE_TRIG (COMPARE_CAPS bit 18); only the low 32 bits of "
+                "comparator A are programmable"
+            )
 
         self.transport.write_reg(_ADDR_PRETRIG, config.pretrigger)
         self.transport.write_reg(_ADDR_POSTTRIG, config.posttrigger)
@@ -721,13 +758,6 @@ class Analyzer:
         # instead of a stale/reset value.  Otherwise an all-zero mask (immediate /
         # always-true) trigger leaves the upper mask bits set, so the trigger is
         # not actually always-true and never fires (the capture never completes).
-        wide = bool(hw_compare_caps & _COMPARE_CAPS_WIDE_TRIG)
-        if not wide and ((config.trigger.value >> 32) or (config.trigger.mask >> 32)):
-            raise ValueError(
-                "trigger value/mask exceed 32 bits but this core lacks "
-                "WIDE_TRIG (COMPARE_CAPS bit 18); only the low 32 bits of "
-                "comparator A are programmable"
-            )
         if wide:
             words = (config.sample_width + 31) // 32
             for k in range(1, words):
@@ -766,19 +796,7 @@ class Analyzer:
             )
 
         if config.sequence is not None:
-            if hw_trig_stages == 0:
-                raise ValueError(
-                    "trigger sequencer not present in this bitstream (TRIG_STAGES=0)"
-                )
-            if len(config.sequence) > hw_trig_stages:
-                raise ValueError(
-                    f"sequence has {len(config.sequence)} stages but hw supports "
-                    f"only {hw_trig_stages}"
-                )
             for idx, stage in enumerate(config.sequence):
-                _validate_compare_mode(hw_compare_caps, stage.cmp_mode_a, f"stage {idx} A")
-                _validate_compare_mode(hw_compare_caps, stage.cmp_mode_b, f"stage {idx} B")
-                _validate_dual_compare(hw_compare_caps, stage, f"stage {idx}")
                 base = _ADDR_SEQ_BASE + idx * _SEQ_STRIDE
                 self.transport.write_reg(base + 0, stage.pack_cfg())
                 self.transport.write_reg(base + 4, stage.value_a)

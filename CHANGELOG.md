@@ -336,6 +336,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **ELA — a refused configuration writes nothing.** A trigger sequence with
+  more stages than the core has, or a wide trigger value on a core without
+  `WIDE_TRIG`, used to be refused after the capture registers were already
+  written, so the next arm ran settings the host did not know about. Every
+  check now runs before the first write. A stage `count_target`,
+  `next_state` or `combine` too wide for `SEQ_CFG` is refused: a
+  `count_target` of 65536 used to program 0, which fires on the first match.
 - **RPC — `configure`/`capture` no longer assume a 1024-deep core.** An
   omitted `depth` defaulted to 1024 and an omitted `sample_width` to 8, so
   any core built another size (the Arty AXI monitor is 256 deep) refused
