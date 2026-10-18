@@ -62,6 +62,7 @@ except ImportError:  # pragma: no cover - no SDK installed
 from ._version import __version__
 from .analyzer import CaptureNotReady
 from .axi_decode import FAULT_FLAGS, PAIRING_ASSUMPTION
+from .ejtagaxi import AXIError
 from .probes import load_probe_text
 from .rpc import (
     _SCHEMA_VERSION,
@@ -599,9 +600,9 @@ def _error_code(exc: BaseException) -> str:
         return "invalid_argument"
     if isinstance(exc, ValueError):
         return "invalid_argument"
-    if isinstance(exc, (RpcError, ConnectionError, OSError)):
-        # The board or the backend refused, or the link failed. Not a bug in
-        # this server, and retrying after a reconnect can work.
+    if isinstance(exc, (RpcError, ConnectionError, OSError, AXIError)):
+        # The board or the backend refused, the link failed, or the AXI bus
+        # answered with an error response. Not a bug in this server.
         return "hardware_error"
     if isinstance(exc, RuntimeError) and getattr(exc, "_fcapz_from_backend", False):
         # A transport's own failure report. A TypeError or KeyError from the

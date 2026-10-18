@@ -3563,6 +3563,14 @@ class BackendFailureCodeTests(unittest.TestCase):
             "hardware_error",
         )
 
+    def test_an_axi_error_response_is_a_hardware_error(self):
+        # SLVERR/DECERR is the bus answering, seen on a real Arty.
+        from fcapz.ejtagaxi import AXIError
+
+        self.assertEqual(
+            self._code(AXIError("Read from 0xFFFFFFFC: resp=2")), "hardware_error"
+        )
+
     def test_a_programming_error_in_the_same_path_stays_internal(self):
         self.assertEqual(self._code(TypeError("bad operand")), "internal")
 
