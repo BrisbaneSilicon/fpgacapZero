@@ -76,6 +76,8 @@ JsonDict = dict[str, Any]
 # session still validates: a schema is the client's contract, not the
 # server's guarantee.
 Backend = Literal["hw_server", "openocd", "usb_blaster"]
+# JTAG IR-code presets; omitted, RPC infers one from the tap name.
+IrTable = Literal["xilinx7", "ultrascale", "gowin"]
 # The debug cores one fcapz_connect can open. RPC `close` tears the whole
 # board session down, so the ELA has no close of its own: "all" is it.
 Core = Literal["ela", "eio", "axi", "uart"]
@@ -87,6 +89,10 @@ FindOp = Literal["edges", "rising", "falling", "match", "bursts"]
 TriggerMode = Literal["value_match", "edge_detect", "both"]
 ExtTriggerMode = Literal[0, 1, 2]  # 0=disabled, 1=OR, 2=AND
 StorQualMode = Literal[0, 1, 2]  # 0=off, 1=store on match, 2=store on no match
+# 0=EQ 1=NEQ 2=LT 3=GT 4=LEQ 5=GEQ (2-5 need REL_COMPARE) 6=RISING 7=FALLING 8=CHANGED
+CompareMode = Literal[0, 1, 2, 3, 4, 5, 6, 7, 8]
+StageCombine = Literal[0, 1, 2, 3]  # 0=A only, 1=B only, 2=A and B, 3=A or B
+StageIndex = Literal[0, 1, 2, 3]
 
 
 class ProbeEntry(TypedDict):
@@ -221,6 +227,28 @@ class SessionStatus(TypedDict):
     last_eio_read: dict[str, Any] | None
 
 
+class SequencerStageDict(TypedDict, total=False):
+    """One trigger-sequencer stage; fields default as in `SequencerStage`.
+
+    Two comparators (A, B) with their own compare mode, value and mask,
+    combined by `combine`; once that holds `count_target` times the stage
+    fires: to `next_state`, or the trigger itself when `is_final`.
+    """
+
+    __pydantic_config__ = ConfigDict(extra="forbid")
+
+    cmp_mode_a: CompareMode
+    cmp_mode_b: CompareMode
+    combine: StageCombine
+    next_state: StageIndex
+    is_final: bool
+    count_target: int
+    value_a: int | str
+    mask_a: int | str
+    value_b: int | str
+    mask_b: int | str
+
+
 class CaptureConfigDict(TypedDict, total=False):
     """Capture fields an agent may set.
 
@@ -261,6 +289,8 @@ class CaptureConfigDict(TypedDict, total=False):
     trigger_delay: int
     rle: bool
     post_clocks: int
+    # The hardware trigger sequencer: up to fcapz_probe's trig_stages stages.
+    trigger_sequence: list[SequencerStageDict]
 
 
 _DEFAULT_CAPTURE_CHUNK_BYTES = 64 * 1024
@@ -1221,6 +1251,7 @@ class FcapzMcpSession:
         tap: str | None,
         hardware: str | None,
         quartus_stp: str | None,
+        ir_table: IrTable | None,
     ) -> None:
         if backend in ("hw_server", "openocd"):
             self._reject_fields(
@@ -1232,6 +1263,8 @@ class FcapzMcpSession:
             )
             req["host"] = self._validated_host(host)
             req["tap"] = tap or self._default_tap(backend)
+            if ir_table is not None:
+                req["ir_table"] = ir_table
             if port is not None:
                 req["port"] = self._validated_port(port)
             return
@@ -1243,6 +1276,7 @@ class FcapzMcpSession:
                     "tap": tap,
                     "port": port,
                     "host": host,
+                    "ir_table": ir_table,
                 },
             )
             if hardware is not None:
@@ -1276,6 +1310,7 @@ class FcapzMcpSession:
         single_chain_burst: bool = True,
         hardware: str | None = None,
         quartus_stp: str | None = None,
+        ir_table: IrTable | None = None,
     ) -> JsonDict:
         program_path = self._validated_program_path(program, backend=backend)
         if self.connected:
@@ -1294,6 +1329,7 @@ class FcapzMcpSession:
             tap=tap,
             hardware=hardware,
             quartus_stp=quartus_stp,
+            ir_table=ir_table,
         )
         if backend == "hw_server":
             req["single_chain_burst"] = single_chain_burst
@@ -2497,6 +2533,7 @@ class FcapzMcpSession:
         chain: int | None,
         hardware: str | None,
         quartus_stp: str | None,
+        ir_table: IrTable | None,
     ) -> JsonDict:
         req: JsonDict = {
             "cmd": cmd,
@@ -2511,6 +2548,7 @@ class FcapzMcpSession:
             tap=tap,
             hardware=hardware,
             quartus_stp=quartus_stp,
+            ir_table=ir_table,
         )
         return req
 
@@ -2524,6 +2562,7 @@ class FcapzMcpSession:
         chain: int | None = None,
         hardware: str | None = None,
         quartus_stp: str | None = None,
+        ir_table: IrTable | None = None,
     ) -> JsonDict:
         if self.eio_connected:
             self.eio_close()
@@ -2540,6 +2579,7 @@ class FcapzMcpSession:
             tap=tap,
             hardware=hardware,
             quartus_stp=quartus_stp,
+            ir_table=ir_table,
         )
         return self._rpc_call(req, commit=self._commit_eio_connected)
 
@@ -2589,6 +2629,7 @@ class FcapzMcpSession:
         chain: int | None = None,
         hardware: str | None = None,
         quartus_stp: str | None = None,
+        ir_table: IrTable | None = None,
     ) -> JsonDict:
         if self.axi_connected:
             self.axi_close()
@@ -2602,6 +2643,7 @@ class FcapzMcpSession:
                 chain=chain,
                 hardware=hardware,
                 quartus_stp=quartus_stp,
+                ir_table=ir_table,
             ),
             commit=self._commit_axi_connected,
         )
@@ -2694,6 +2736,7 @@ class FcapzMcpSession:
         chain: int | None = None,
         hardware: str | None = None,
         quartus_stp: str | None = None,
+        ir_table: IrTable | None = None,
     ) -> JsonDict:
         if self.uart_connected:
             self.uart_close()
@@ -2707,6 +2750,7 @@ class FcapzMcpSession:
                 chain=chain,
                 hardware=hardware,
                 quartus_stp=quartus_stp,
+                ir_table=ir_table,
             ),
             commit=self._commit_uart_connected,
         )
@@ -2765,6 +2809,7 @@ class FcapzMcpSession:
         single_chain_burst: bool = True,
         hardware: str | None = None,
         quartus_stp: str | None = None,
+        ir_table: IrTable | None = None,
     ) -> JsonDict:
         """Open one debug core; the MCP surface has a single connect tool."""
         fields: JsonDict = {
@@ -2775,6 +2820,7 @@ class FcapzMcpSession:
             "chain": chain,
             "hardware": hardware,
             "quartus_stp": quartus_stp,
+            "ir_table": ir_table,
         }
         if core == "ela":
             return self.connect(
@@ -3238,6 +3284,7 @@ def build_mcp_server(
         single_chain_burst: bool = True,
         hardware: str | None = None,
         quartus_stp: str | None = None,
+        ir_table: IrTable | None = None,
     ) -> JsonDict:
         """Connect to a debug core: the ELA (default), EIO, AXI or UART bridge.
 
@@ -3255,7 +3302,9 @@ def build_mcp_server(
         host process, so it is rejected unless fcapz-mcp was started with
         --allow-program (omit it to use the server's configured toolchain).
         `hardware`/`quartus_stp` are rejected for the other backends, and
-        host/port/tap are rejected for usb_blaster. `program` (ELA only,
+        host/port/tap/ir_table are rejected for usb_blaster. `ir_table` picks
+        the JTAG IR codes for hw_server/openocd; omit it to infer them from
+        the tap name (gw* is Gowin, xcku/xcvu/xcau UltraScale, else 7-series). `program` (ELA only,
         hw_server only) is disabled unless started with --allow-program and
         must be an existing .bit file; `single_chain_burst` is ELA only.
         """
@@ -3271,6 +3320,7 @@ def build_mcp_server(
             single_chain_burst=single_chain_burst,
             hardware=hardware,
             quartus_stp=quartus_stp,
+            ir_table=ir_table,
         )
 
     @tool(destructiveHint=False, idempotentHint=True, readOnlyHint=False)
@@ -3329,7 +3379,9 @@ def build_mcp_server(
         rle_width > 0 in fcapz_probe; not with decimation or stor_qual_mode);
         post_clocks also ends such a capture that many clocks after the
         trigger. stor_qual_mode stores only matching (1) or only non-matching
-        (2) samples.
+        (2) samples. trigger_sequence programs a multi-stage trigger on a core
+        with trig_stages > 1 (compare modes 0-8: EQ, NEQ, LT, GT, LEQ, GEQ,
+        RISING, FALLING, CHANGED; combine 0-3: A, B, A and B, A or B).
         The tool returns summary metadata only; page the samples with
         fcapz_get_capture_samples, or read fcapz://last-capture /
         fcapz_get_last_capture for the payload.

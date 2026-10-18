@@ -9,6 +9,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **MCP — multi-stage trigger sequences.** The capture `config` takes
+  `trigger_sequence`, one typed object per sequencer stage (compare modes
+  `0`-`8`, `combine` `0`-`3`, `next_state` `0`-`3`), so a core built with
+  `TRIG_STAGES > 1` can be driven from an agent as it already could from RPC.
+
+- **MCP — `fcapz_connect` takes `ir_table`.** For `hw_server` and `openocd`
+  it names the JTAG IR-code preset (`xilinx7`, `ultrascale`, `gowin`) when the
+  tap name does not identify the family; omitted, RPC still infers it.
+
 - **MCP — run-length captures and the storage-qualification modes.** The
   capture `config` takes `rle` and `post_clocks`, and `stor_qual_mode` is now
   the enum `0`/`1`/`2` (off, store on match, store on no match) in the

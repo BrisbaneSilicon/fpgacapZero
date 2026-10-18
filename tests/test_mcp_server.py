@@ -31,6 +31,7 @@ from fcapz.mcp_server import (
     _coded_error,
     _error_code,
     CaptureConfigDict,
+    SequencerStageDict,
     FcapzMcpError,
     SessionStatus,
     _CommandState,
@@ -301,6 +302,31 @@ class FcapzMcpSessionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown backend: spi"):
             session.connect(backend="spi")
 
+    def test_connect_forwards_an_explicit_ir_table(self):
+        rpc = FakeRpc()
+        session = FcapzMcpSession(rpc=rpc)
+
+        session.connect(backend="openocd", tap="odd-name.tap", ir_table="gowin")
+        session.eio_connect(backend="openocd", tap="odd-name.tap", ir_table="gowin")
+
+        self.assertEqual(rpc.requests[0]["ir_table"], "gowin")
+        self.assertEqual(rpc.requests[-1]["ir_table"], "gowin")
+
+    def test_connect_leaves_the_ir_table_to_rpc_when_omitted(self):
+        # RPC infers the preset from the tap name; MCP must not pin one.
+        rpc = FakeRpc()
+        FcapzMcpSession(rpc=rpc).connect(backend="openocd", tap="GW1NR-9C.tap")
+        self.assertNotIn("ir_table", rpc.requests[0])
+
+    def test_every_ir_table_mcp_offers_is_one_rpc_accepts(self):
+        from typing import get_args
+
+        from fcapz.rpc import RpcServer
+
+        for name in get_args(mcp_server.IrTable):
+            with self.subTest(name=name):
+                RpcServer._ir_table(name)  # raises on an unknown preset
+
     def test_connect_rejects_backend_irrelevant_options(self):
         session = FcapzMcpSession(rpc=FakeRpc())
 
@@ -310,6 +336,8 @@ class FcapzMcpSessionTests(unittest.TestCase):
             session.connect(backend="usb_blaster", tap="xc7a100t.tap")
         with self.assertRaisesRegex(ValueError, "host not supported"):
             session.connect(backend="usb_blaster", host="127.0.0.1")
+        with self.assertRaisesRegex(ValueError, "ir_table not supported"):
+            session.connect(backend="usb_blaster", ir_table="gowin")
         with self.assertRaisesRegex(ValueError, "quartus_stp not supported"):
             session.eio_connect(backend="openocd", quartus_stp="quartus_stp")
 
@@ -1599,6 +1627,7 @@ class TypedToolSchemaTests(unittest.TestCase):
 
         for shape in (
             CaptureConfigDict,
+            SequencerStageDict,
             ProbeEntry,
             SamplePage,
             AxiTransactionPage,
@@ -2555,6 +2584,33 @@ class ToolCallGuardTests(unittest.TestCase):
         self.assertEqual(body["code"], "invalid_argument")
         self.assertIn("posttriger", body["message"])
         self.assertEqual(self.rpc.requests, [], "the capture must not have run")
+
+    def test_a_trigger_sequence_reaches_rpc(self):
+        stages = [
+            {"cmp_mode_a": 6, "mask_a": 1, "next_state": 1},
+            {"cmp_mode_a": 0, "value_a": "0xff", "mask_a": "0xff", "is_final": True},
+        ]
+        app = self._app()
+        asyncio.run(app.call_tool("fcapz_capture", {"config": {"trigger_sequence": stages}}))
+
+        self.assertEqual(self.rpc.requests[-1]["trigger_sequence"], stages)
+
+    def test_a_misspelled_sequencer_stage_field_is_rejected(self):
+        body = self._failure(
+            "fcapz_capture", {"config": {"trigger_sequence": [{"cmp_mode": 6}]}}
+        )
+
+        self.assertEqual(body["code"], "invalid_argument")
+        self.assertIn("cmp_mode", body["message"])
+        self.assertEqual(self.rpc.requests, [])
+
+    def test_a_compare_mode_outside_the_enum_is_rejected(self):
+        body = self._failure(
+            "fcapz_capture", {"config": {"trigger_sequence": [{"cmp_mode_a": 9}]}}
+        )
+
+        self.assertEqual(body["code"], "invalid_argument")
+        self.assertEqual(self.rpc.requests, [])
 
     def test_a_misspelled_tool_argument_is_rejected_not_dropped(self):
         body = self._failure("fcapz_capture", {"formatt": "csv"})

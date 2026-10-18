@@ -220,14 +220,19 @@ The live RPC layer supports:
 
 | Backend | Target fields | Optional fields |
 | --- | --- | --- |
-| `hw_server` | `host`, `port`, `tap` | `program`, `single_chain_burst` defaults to `true` |
-| `openocd` | `host`, `port`, `tap` | - |
+| `hw_server` | `host`, `port`, `tap`, `ir_table` | `program`, `single_chain_burst` defaults to `true` |
+| `openocd` | `host`, `port`, `tap`, `ir_table` | - |
 | `usb_blaster` | `hardware`, `quartus_stp` | - |
+
+`ir_table` names the JTAG IR-code preset: `"xilinx7"`, `"ultrascale"` or
+`"gowin"`. Omit it and the RPC layer infers one from `tap` (`gw*` is Gowin,
+`xcku*`/`xcvu*`/`xcau*` UltraScale, anything else 7-series); pass it when the
+tap name does not say which family the part is.
 
 Backend-irrelevant fields are rejected instead of being silently forwarded.
 `hw_server` and `openocd` default `host` to `127.0.0.1` when omitted.
 `usb_blaster` (Intel/Altera via Quartus) has no host concept, so `host`,
-`port`, and `tap` are rejected for it — even an explicit `host="127.0.0.1"`.
+`port`, `tap` and `ir_table` are rejected for it — even an explicit `host="127.0.0.1"`.
 Any other backend name is rejected up front with `unknown backend: <name>`.
 
 A caller-supplied `quartus_stp` names a host executable that the transport
@@ -383,6 +388,7 @@ Valid `config` keys for `fcapz_capture` and `fcapz_configure` are:
 | `trigger_delay` | Delay between trigger match and capture stop window. |
 | `rle` | Run-length capture: each stored entry is a value and the sample clocks it held. Needs `rle_width > 0` in `fcapz_probe`; not with `decimation` or `stor_qual_mode`. |
 | `post_clocks` | With `rle`, also end the capture this many sample clocks after the trigger (0 = no limit). |
+| `trigger_sequence` | Programs the hardware trigger sequencer, one object per stage, up to `trig_stages` in `fcapz_probe`. Each stage takes `cmp_mode_a`/`cmp_mode_b` (`0`-`8`: EQ, NEQ, LT, GT, LEQ, GEQ, RISING, FALLING, CHANGED; LT-GEQ need `REL_COMPARE`), `value_a`/`mask_a`/`value_b`/`mask_b`, `combine` (`0` A, `1` B, `2` A and B, `3` A or B), `count_target`, `next_state` (`0`-`3`) and `is_final`. See the trigger sequencer in [ELA core](05_ela_core.md). |
 
 ### Embedded I/O
 
