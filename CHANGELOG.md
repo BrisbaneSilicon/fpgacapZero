@@ -343,6 +343,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   check now runs before the first write. A stage `count_target`,
   `next_state` or `combine` too wide for `SEQ_CFG` is refused: a
   `count_target` of 65536 used to program 0, which fires on the first match.
+- **ELA — storage qualification is refused on a core built without it.** A
+  `stor_qual_mode` of 1 or 2 on a `STOR_QUAL=0` core was accepted and the
+  capture stored every sample, while the caller believed it was filtered.
+  It is now refused before anything is written, as run-length capture and
+  the trigger sequencer already were.
 - **CLI — `axi-decode` and `capture --decode-axi` read run-length captures.**
   Each entry was taken as one cycle, which shortened latencies (an 8-cycle
   wait could read as 2) and could merge back-to-back handshakes. Entries now

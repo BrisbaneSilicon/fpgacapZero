@@ -85,6 +85,7 @@ _ADDR_SEG_SEL = 0x00C0
 _ADDR_SEG_START = 0x00C8
 _ADDR_TIMESTAMP_W = 0x00C4
 _ADDR_FEATURES = 0x003C
+_FEATURE_STOR_QUAL = 1 << 4  # FEATURES[4]: built with STOR_QUAL
 _ADDR_SEQ_BASE = 0x0040
 _SEQ_STRIDE = 20
 _ADDR_PROBE_SEL = 0x00AC
@@ -686,6 +687,12 @@ class Analyzer:
         raw_compare_caps = int(_read(_ADDR_COMPARE_CAPS))
         self._hw_compare_caps = raw_compare_caps
         hw_compare_caps = raw_compare_caps or _COMPARE_CAPS_LEGACY_FULL
+        # Without the qualifier SQ_MODE is not decoded, and the capture would
+        # store every sample while the caller believes it was filtered.
+        if config.stor_qual_mode and not hw_features & _FEATURE_STOR_QUAL:
+            raise ValueError(
+                "storage qualification not present in this bitstream (STOR_QUAL=0)"
+            )
         sq_mode = _sq_mode_register(raw_compare_caps, config.stor_qual_mode)
         self._hw_timestamp_w = int(_read(_ADDR_TIMESTAMP_W))
         self._hw_num_segments = max(1, int(_read(_ADDR_NUM_SEGMENTS)))
@@ -1588,7 +1595,7 @@ class Analyzer:
             "depth": depth,
             "num_channels": num_chan if num_chan >= 1 else 1,
             "trig_stages": int(features & 0xF),
-            "has_storage_qualification": bool(features & (1 << 4)),
+            "has_storage_qualification": bool(features & _FEATURE_STOR_QUAL),
             "has_decimation": bool(features & (1 << 5)),
             "has_ext_trigger": bool(features & (1 << 6)),
             "has_timestamp": bool(features & (1 << 7)),

@@ -1113,8 +1113,15 @@ class AnalyzerTests(unittest.TestCase):
 class StorageQualModeTests(unittest.TestCase):
     """stor_qual_mode 1 (match) and 2 (no match) map onto SQ_MODE by core."""
 
-    def _configure(self, caps: int, mode: int, old_sq_mode: int = 0) -> FakeTransport:
+    @staticmethod
+    def _sq_core() -> FakeTransport:
+        """A core built with STOR_QUAL (FEATURES[4])."""
         transport = FakeTransport()
+        transport.regs[0x003C] = int(transport.regs[0x003C]) | (1 << 4)
+        return transport
+
+    def _configure(self, caps: int, mode: int, old_sq_mode: int = 0) -> FakeTransport:
+        transport = self._sq_core()
         transport.regs[0x00E0] = caps
         transport.regs[0x0030] = old_sq_mode
         analyzer = Analyzer(transport)
@@ -1136,8 +1143,24 @@ class StorageQualModeTests(unittest.TestCase):
         for caps in (0x3_01FF, 0):  # 0 = core older than COMPARE_CAPS
             self.assertEqual(self._configure(caps, 2).regs[0x0030], 1)
 
+    def test_a_core_without_the_qualifier_refuses_before_writing(self):
+        # SQ_MODE is not decoded there: the capture would store every sample
+        # while the caller believes it was filtered.
+        for mode in (1, 2):
+            with self.subTest(mode=mode):
+                transport = FakeTransport()
+                transport.regs[0x00E0] = 0x3_01FF | (1 << 22)
+                analyzer = Analyzer(transport)
+                analyzer.connect()
+                before = dict(transport.regs)
+                with self.assertRaisesRegex(ValueError, "STOR_QUAL=0"):
+                    analyzer.configure(
+                        replace(AnalyzerTests()._make_cfg(), stor_qual_mode=mode)
+                    )
+                self.assertEqual(transport.regs, before)
+
     def test_older_core_rejects_match_before_writing(self):
-        transport = FakeTransport()
+        transport = self._sq_core()
         analyzer = Analyzer(transport)
         analyzer.connect()
         before = dict(transport.regs)
