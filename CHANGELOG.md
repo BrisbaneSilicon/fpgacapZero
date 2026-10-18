@@ -348,6 +348,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   capture stored every sample, while the caller believed it was filtered.
   It is now refused before anything is written, as run-length capture and
   the trigger sequencer already were.
+- **EJTAG-AXI — the bridge is usable after an error response.** The bridge's
+  error flag stays set until a RESET, and the host never sent one, so after
+  one SLVERR/DECERR every later read or write failed (reporting `resp=0`)
+  until a reconnect. The host now clears the flag when it reports the error.
 - **CLI — `axi-decode` and `capture --decode-axi` read run-length captures.**
   Each entry was taken as one cycle, which shortened latencies (an 8-cycle
   wait could read as 2) and could merge back-to-back handshakes. Entries now

@@ -451,6 +451,21 @@ class EjtagAxiTests(unittest.TestCase):
         with self.assertRaises(AXIError):
             ctrl.axi_read(t.error_addr)
 
+    def test_the_bridge_is_usable_after_an_error_response(self):
+        # The bridge's error flag is sticky until CMD_RESET; left set, every
+        # later command reported the old error (with resp=0) until a reconnect.
+        for name, fail in (
+            ("write", lambda c, t: c.axi_write(t.error_addr, 0x1234)),
+            ("read", lambda c, t: c.axi_read(t.error_addr)),
+        ):
+            with self.subTest(name):
+                ctrl, t = self._make_ctrl()
+                ctrl.axi_write(0x0004, 0xBEEF)
+                with self.assertRaises(AXIError):
+                    fail(ctrl, t)
+                self.assertFalse(t.error_sticky)
+                self.assertEqual(ctrl.axi_read(0x0004), 0xBEEF)
+
     def test_busy_retries_then_succeeds(self):
         ctrl, t = self._make_ctrl()
         t.busy_count = 3
