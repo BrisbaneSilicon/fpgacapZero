@@ -312,6 +312,30 @@ class FcapzMcpSessionTests(unittest.TestCase):
         self.assertEqual(rpc.requests[0]["ir_table"], "gowin")
         self.assertEqual(rpc.requests[-1]["ir_table"], "gowin")
 
+    def test_a_refused_reconnect_keeps_the_live_sessions(self):
+        # Arguments are checked before anything is closed, so a typo in a
+        # reconnect costs nothing; it used to drop the working session.
+        rpc = FakeRpc()
+        session = FcapzMcpSession(rpc=rpc)
+        session.connect(backend="usb_blaster")
+        session.eio_connect(backend="usb_blaster")
+        session.axi_connect(backend="usb_blaster")
+        session.uart_connect(backend="usb_blaster")
+        sent = len(rpc.requests)
+
+        for reconnect in (session.connect, session.eio_connect, session.axi_connect,
+                          session.uart_connect):
+            with self.subTest(reconnect=reconnect.__name__):
+                with self.assertRaisesRegex(ValueError, "ir_table"):
+                    reconnect(backend="usb_blaster", ir_table="gowin")
+                with self.assertRaises(PermissionError):
+                    reconnect(backend="openocd", host="192.0.2.1")
+
+        self.assertEqual(len(rpc.requests), sent)
+        status = session.status()
+        for flag in ("connected", "eio_connected", "axi_connected", "uart_connected"):
+            self.assertTrue(status[flag], flag)
+
     def test_connect_leaves_the_ir_table_to_rpc_when_omitted(self):
         # RPC infers the preset from the tap name; MCP must not pin one.
         rpc = FakeRpc()
@@ -2612,6 +2636,14 @@ class ToolCallGuardTests(unittest.TestCase):
         self.assertEqual(body["code"], "invalid_argument")
         self.assertEqual(self.rpc.requests, [])
 
+    def test_a_count_target_seq_cfg_cannot_hold_is_rejected(self):
+        body = self._failure(
+            "fcapz_capture", {"config": {"trigger_sequence": [{"count_target": 65536}]}}
+        )
+
+        self.assertEqual(body["code"], "invalid_argument")
+        self.assertEqual(self.rpc.requests, [])
+
     def test_a_misspelled_tool_argument_is_rejected_not_dropped(self):
         body = self._failure("fcapz_capture", {"formatt": "csv"})
 
@@ -3301,6 +3333,31 @@ class AxiWriteRangeTests(unittest.TestCase):
             with self.assertRaisesRegex(PermissionError, "0x40000000-0x4000FFFF"):
                 call()
         self.assertEqual(session.rpc.requests, [])
+
+    def test_a_span_that_would_wrap_the_bridge_address_is_refused(self):
+        # A 16-bit bridge's address counter wraps: the second word of a block
+        # at 0xFFFC lands on 0x0000, outside a range that admits 0xFFFC.
+        class NarrowBridgeRpc(FakeRpc):
+            def handle(self, req):
+                response = super().handle(req)
+                if req["cmd"] == "axi_connect":
+                    response["addr_w"] = 16
+                return response
+
+        rpc = NarrowBridgeRpc()
+        session = FcapzMcpSession(
+            rpc=rpc,
+            capabilities=McpCapabilities(
+                allow_axi_write=True, axi_write_ranges=((0xFFF0, 0x10003),)
+            ),
+        )
+        session.axi_connect(backend="usb_blaster")
+        session.axi_write(0xFFFC, 1)  # the last word that fits
+        with self.assertRaisesRegex(PermissionError, "16-bit address space"):
+            session.axi_write_block(0xFFFC, [1, 2])
+        self.assertEqual(
+            [req["cmd"] for req in rpc.requests], ["axi_connect", "axi_write"]
+        )
 
     def test_no_ranges_means_the_whole_bus(self):
         session = FcapzMcpSession(

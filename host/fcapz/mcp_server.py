@@ -29,12 +29,15 @@ from threading import RLock
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional
+from typing import Annotated, Any, Callable, Literal, Optional
 
 try:
-    from pydantic import ConfigDict, ValidationError
+    from pydantic import ConfigDict, Field, ValidationError
 except ImportError:  # pragma: no cover - no SDK installed
     ConfigDict = dict  # type: ignore[assignment,misc]
+
+    def Field(**_kw: Any) -> None:  # type: ignore[no-redef]  # noqa: N802
+        return None
 
     class ValidationError(Exception):  # type: ignore[no-redef]
         pass
@@ -242,7 +245,8 @@ class SequencerStageDict(TypedDict, total=False):
     combine: StageCombine
     next_state: StageIndex
     is_final: bool
-    count_target: int
+    # SEQ_CFG holds 16 bits of it.
+    count_target: Annotated[int, Field(ge=0, le=0xFFFF)]
     value_a: int | str
     mask_a: int | str
     value_b: int | str
@@ -781,6 +785,8 @@ class FcapzMcpSession:
     last_eio_read: JsonDict | None = None
     last_rpc_schema_version: str | None = _SCHEMA_VERSION
     _capture_cache: "_CaptureCache | None" = field(default=None, init=False, repr=False)
+    # The connected AXI bridge's address width, which bounds a confined write.
+    _axi_addr_w: int | None = field(default=None, init=False, repr=False)
     # One lock guards session state, the active-command slot and every command
     # state transition, so a commit and a watchdog giveup cannot interleave.
     _rpc_lock: RLock = field(default_factory=RLock, init=False, repr=False)
@@ -1182,10 +1188,13 @@ class FcapzMcpSession:
 
     def _commit_axi_connected(self, response: JsonDict) -> JsonDict:
         self.axi_connected = True
+        addr_w = response.get("addr_w")
+        self._axi_addr_w = addr_w if isinstance(addr_w, int) and 0 < addr_w <= 64 else None
         return response
 
     def _commit_axi_closed(self, response: JsonDict) -> JsonDict:
         self.axi_connected = False
+        self._axi_addr_w = None
         return response
 
     def _commit_uart_connected(self, response: JsonDict) -> JsonDict:
@@ -1204,6 +1213,7 @@ class FcapzMcpSession:
         self.connected = False
         self.eio_connected = False
         self.axi_connected = False
+        self._axi_addr_w = None
         self.uart_connected = False
         self.last_probe = None
         self._capture_cache = None
@@ -1313,8 +1323,6 @@ class FcapzMcpSession:
         ir_table: IrTable | None = None,
     ) -> JsonDict:
         program_path = self._validated_program_path(program, backend=backend)
-        if self.connected:
-            self.close()
         req: JsonDict = {
             "cmd": "connect",
             "backend": backend,
@@ -1337,6 +1345,10 @@ class FcapzMcpSession:
             raise ValueError(f"single_chain_burst not supported for backend {backend!r}")
         if program_path is not None:
             req["program"] = str(program_path)
+        # Only once the request is known good: a refused reconnect keeps
+        # the session it would have replaced.
+        if self.connected:
+            self.close()
         return self._rpc_call(req, commit=self._commit_connected)
 
     _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -2564,8 +2576,6 @@ class FcapzMcpSession:
         quartus_stp: str | None = None,
         ir_table: IrTable | None = None,
     ) -> JsonDict:
-        if self.eio_connected:
-            self.eio_close()
         req: JsonDict = {
             "cmd": "eio_connect",
             "backend": backend,
@@ -2581,6 +2591,8 @@ class FcapzMcpSession:
             quartus_stp=quartus_stp,
             ir_table=ir_table,
         )
+        if self.eio_connected:  # after validation, as in connect()
+            self.eio_close()
         return self._rpc_call(req, commit=self._commit_eio_connected)
 
     def eio_close(self) -> JsonDict:
@@ -2631,22 +2643,20 @@ class FcapzMcpSession:
         quartus_stp: str | None = None,
         ir_table: IrTable | None = None,
     ) -> JsonDict:
-        if self.axi_connected:
-            self.axi_close()
-        return self._rpc_call(
-            self._bridge_connect_req(
-                cmd="axi_connect",
-                backend=backend,
-                host=host,
-                port=port,
-                tap=tap,
-                chain=chain,
-                hardware=hardware,
-                quartus_stp=quartus_stp,
-                ir_table=ir_table,
-            ),
-            commit=self._commit_axi_connected,
+        req = self._bridge_connect_req(
+            cmd="axi_connect",
+            backend=backend,
+            host=host,
+            port=port,
+            tap=tap,
+            chain=chain,
+            hardware=hardware,
+            quartus_stp=quartus_stp,
+            ir_table=ir_table,
         )
+        if self.axi_connected:  # after validation, as in connect()
+            self.axi_close()
+        return self._rpc_call(req, commit=self._commit_axi_connected)
 
     def axi_close(self) -> JsonDict:
         if self._closed_locally("axi_connected", reset=lambda: None):
@@ -2703,6 +2713,16 @@ class FcapzMcpSession:
         ranges = self.capabilities.axi_write_ranges
         if not ranges:
             return
+        # The bridge's address counter is addr_w bits wide and wraps: a span
+        # running past its top would land its last words at address 0.
+        if self._axi_addr_w is not None:
+            top = (1 << self._axi_addr_w) - 1
+            if addr < 0 or addr + 4 * words - 1 > top:
+                raise PermissionError(
+                    f"AXI write of {words} word(s) at 0x{addr:X} runs past the "
+                    f"bridge's {self._axi_addr_w}-bit address space (top 0x{top:X}), "
+                    "where it would wrap"
+                )
         for word in range(words):
             lo = addr + 4 * word
             hi = lo + 3
@@ -2738,22 +2758,20 @@ class FcapzMcpSession:
         quartus_stp: str | None = None,
         ir_table: IrTable | None = None,
     ) -> JsonDict:
-        if self.uart_connected:
-            self.uart_close()
-        return self._rpc_call(
-            self._bridge_connect_req(
-                cmd="uart_connect",
-                backend=backend,
-                host=host,
-                port=port,
-                tap=tap,
-                chain=chain,
-                hardware=hardware,
-                quartus_stp=quartus_stp,
-                ir_table=ir_table,
-            ),
-            commit=self._commit_uart_connected,
+        req = self._bridge_connect_req(
+            cmd="uart_connect",
+            backend=backend,
+            host=host,
+            port=port,
+            tap=tap,
+            chain=chain,
+            hardware=hardware,
+            quartus_stp=quartus_stp,
+            ir_table=ir_table,
         )
+        if self.uart_connected:  # after validation, as in connect()
+            self.uart_close()
+        return self._rpc_call(req, commit=self._commit_uart_connected)
 
     def uart_close(self) -> JsonDict:
         if self._closed_locally("uart_connected", reset=lambda: None):

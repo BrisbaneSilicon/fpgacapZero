@@ -163,7 +163,10 @@ fcapz-mcp --axi-write-range 0x40000000:0x4000FFFF --axi-write-range 0x43C00000:0
 Every byte of every word a call writes must fall inside some range, so two
 adjacent ranges admit a block that straddles them, and a call with any word
 outside is refused whole (`not_permitted`, naming the word and the ranges)
-rather than written part way. Reads are not confined. `fcapz_status` reports
+rather than written part way. A block that would run past the top of the
+bridge's address space (its `addr_w` from `fcapz_connect`) is refused too,
+because the bridge's address counter would wrap it to address 0.
+Reads are not confined. `fcapz_status` reports
 the ranges under `capabilities.axi_write_ranges` (`null` when writes, if
 enabled, may go anywhere).
 
@@ -388,7 +391,7 @@ Valid `config` keys for `fcapz_capture` and `fcapz_configure` are:
 | `trigger_delay` | Delay between trigger match and capture stop window. |
 | `rle` | Run-length capture: each stored entry is a value and the sample clocks it held. Needs `rle_width > 0` in `fcapz_probe`; not with `decimation` or `stor_qual_mode`. |
 | `post_clocks` | With `rle`, also end the capture this many sample clocks after the trigger (0 = no limit). |
-| `trigger_sequence` | Programs the hardware trigger sequencer, one object per stage, up to `trig_stages` in `fcapz_probe`. Each stage takes `cmp_mode_a`/`cmp_mode_b` (`0`-`8`: EQ, NEQ, LT, GT, LEQ, GEQ, RISING, FALLING, CHANGED; LT-GEQ need `REL_COMPARE`), `value_a`/`mask_a`/`value_b`/`mask_b`, `combine` (`0` A, `1` B, `2` A and B, `3` A or B), `count_target`, `next_state` (`0`-`3`) and `is_final`. See the trigger sequencer in [ELA core](05_ela_core.md). |
+| `trigger_sequence` | Programs the hardware trigger sequencer, one object per stage, up to `trig_stages` in `fcapz_probe`. Each stage takes `cmp_mode_a`/`cmp_mode_b` (`0`-`8`: EQ, NEQ, LT, GT, LEQ, GEQ, RISING, FALLING, CHANGED; LT-GEQ need `REL_COMPARE`), `value_a`/`mask_a`/`value_b`/`mask_b`, `combine` (`0` A, `1` B, `2` A and B, `3` A or B), `count_target` (`0`-`65535`), `next_state` (`0`-`3`) and `is_final`. See the trigger sequencer in [ELA core](05_ela_core.md). |
 
 ### Embedded I/O
 
@@ -793,6 +796,7 @@ Debug a bus fault with the AXI monitor — anomalies first, then their context:
 ```text
 fcapz_connect(backend="hw_server")
 fcapz_list_cores()                       # find the AXI monitor's chain
+fcapz_connect(backend="hw_server", chain=<monitor chain>)
 fcapz_capture(config={"probe_file": "axi.prob", "pretrigger": 512,
                       "posttrigger": 3584}, timeout=10.0)
                                          # summary carries the AXI headline counts
