@@ -9,8 +9,8 @@ ASIC flows such as LibreLane (Tiny Tapeout) run `check` right after the
 optimize first and never see those problems, so they can sit unnoticed: a
 loop index shared by two clocked blocks, for example, gets one flop per block
 there, and the two conflict. This gate mirrors that step for every target in
-sim/run_verilator_lint.py at default parameters, plus every Verilog parameter
-set listed in the sim/parity manifests.
+sim/run_verilator_lint.py, with that target's -G parameter overrides, plus
+every Verilog parameter set listed in the sim/parity manifests.
 """
 
 from __future__ import annotations
@@ -38,8 +38,13 @@ class CheckRun:
     params: dict[str, object] = field(default_factory=dict)
 
 
+def overrides(flags: tuple[str, ...]) -> dict[str, object]:
+    """The -G<name>=<value> parameter overrides among a target's Verilator flags."""
+    return dict(f[2:].split("=", 1) for f in flags if f.startswith("-G"))
+
+
 def lint_runs() -> list[CheckRun]:
-    return [CheckRun(t.name, t.top, t.sources) for t in TARGETS]
+    return [CheckRun(t.name, t.top, t.sources, overrides(t.extra_flags)) for t in TARGETS]
 
 
 def manifest_runs() -> list[CheckRun]:
@@ -137,7 +142,8 @@ def run_gate(yosys: str, runs: list[CheckRun], workdir: Path) -> bool:
             print("\n".join(warnings))
             ok = False
         else:
-            print(f"[yosys] ok {run.name}", flush=True)
+            params = " ".join(f"{k}={v}" for k, v in run.params.items())
+            print(f"[yosys] ok {run.name}" + (f" ({params})" if params else ""), flush=True)
     return ok
 
 

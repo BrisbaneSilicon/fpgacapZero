@@ -78,8 +78,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **CI — RTL lint now includes yosys's pre-synthesis check.** A new
   `sim/run_yosys_check.py` runs `proc` then `check` (LibreLane's
-  `pre_synth_chk` step) on every Verilator lint target and every Verilog
-  parameter set in the parity manifests, and fails on any warning. Its
+  `pre_synth_chk` step) on every Verilator lint target, with that target's
+  `-G` parameter overrides, and on every Verilog parameter set in the parity
+  manifests, and fails on any warning. Its
   `--self-test` proves it rejects a loop index shared by two clocked blocks.
   The `lint-rtl` job now gets Verilator and yosys from a pinned OSS CAD Suite;
   Ubuntu's Verilator was too old to report `MULTIDRIVENPROC`. The job also
