@@ -713,7 +713,7 @@ the backend's own error object as `detail`.
 | `invalid_argument` | An argument was rejected. | no |
 | `not_found` | A path does not exist on the server. | no |
 | `unknown_tool` | This server does not publish that tool. | no |
-| `hardware_error` | The board or backend rejected the command. | yes |
+| `hardware_error` | The board or backend rejected the command, or the AXI bus answered `SLVERR`/`DECERR`. | yes |
 | `internal` | A bug in `fcapz-mcp`. | no |
 
 Every failure of a tool call is coded, including the two that never reach the
